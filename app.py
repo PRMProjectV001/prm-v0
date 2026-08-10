@@ -13,6 +13,7 @@ GEOCODE_REVERSE="https://data.geopf.fr/geocodage/reverse"
 CADASTRE_URL="https://apicarto.ign.fr/api/cadastre/parcelle"
 GPU_BASE="https://apicarto.ign.fr/api/gpu"
 GEORISQUES_REPORT="https://georisques.gouv.fr/api/v1/resultats_rapport_risque"
+BDNB_BASE="https://api.bdnb.io/v1/bdnb"
 TIMEOUT=20
 
 def api_get(url,params=None):
@@ -62,24 +63,70 @@ def reverse_ids(features):
         if m: out.add(f"{m.group(1)} {m.group(2)}")
     return out
 
-def auto_resolve(lon,lat):
+def _find_values(obj, key_substr):
+    vals=[]
+    def walk(x):
+        if isinstance(x,dict):
+            for k,v in x.items():
+                if key_substr.lower() in str(k).lower(): vals.append(v)
+                walk(v)
+        elif isinstance(x,list):
+            for v in x: walk(v)
+    walk(obj)
+    return vals
+
+def bdnb_parcel_ids(address):
+    meta={}
+    g,err=api_get(f"{BDNB_BASE}/geocodage",{"q":address})
+    if err or not g:
+        meta["geocodage_error"]=err
+        return set(),meta
+    keys=[v for v in _find_values(g,"cle_interop_adr") if isinstance(v,str) and v.strip()]
+    if not keys:
+        meta["geocodage_error"]="cle_interop_adr non trouvée"
+        return set(),meta
+    key=keys[0].strip(); meta["cle_interop_adr"]=key
+    endpoint=f"{BDNB_BASE}/donnees/batiment_groupe_complet/adresse"
+    responses=[]
+    for params in ({"cle_interop_adr":f"eq.{key}","limit":20},{"cle_interop_adr":key,"limit":20}):
+        data,e=api_get(endpoint,params)
+        if not e and data:
+            responses.append(data); break
+        meta.setdefault("query_errors",[]).append(e)
+    ids=set()
+    def scan(x,parent=""):
+        if isinstance(x,dict):
+            for k,v in x.items(): scan(v,str(k))
+        elif isinstance(x,list):
+            for v in x: scan(v,parent)
+        elif isinstance(x,(str,int,float)) and ("parcelle" in parent.lower() or "cadastr" in parent.lower()):
+            s=str(x).upper()
+            for m in re.finditer(r"([A-Z]{1,2})(\d{4})\b",s): ids.add(f"{m.group(1)} {m.group(2)}")
+    for r in responses: scan(r)
+    return ids,meta
+
+def auto_resolve(address,lon,lat):
     candidates,cerr=get_candidates(lon,lat)
-    rev,rerr=reverse_parcel(lon,lat)
-    rid=reverse_ids(rev)
-    selected=[]; reasons={}
-    for dist,f in candidates:
-        pid=parcel_id(f)
-        if pid in rid:
-            selected.append(f); reasons[pid]="Confirmée par géocodage inverse IGN"
-    for dist,f in candidates:
-        pid=parcel_id(f)
-        if dist<=3 and pid not in [parcel_id(x) for x in selected]:
-            selected.append(f); reasons[pid]=f"Au contact immédiat du point d’adresse (~{dist:.1f} m)"
-    if not selected and candidates:
-        dist,f=candidates[0]; selected=[f]; reasons[parcel_id(f)]=f"Parcelle la plus proche (~{dist:.1f} m), à confirmer"
-    selected=selected[:3]
-    conf="élevée" if rid and any(parcel_id(f) in rid for f in selected) else ("moyenne" if selected else "faible")
-    return selected,reasons,conf,{"cadastre":cerr,"reverse_parcel":rerr},candidates
+    reasons={}
+    bdnb_ids,bdnb_meta=bdnb_parcel_ids(address)
+    bdnb_matches=[f for d,f in candidates if parcel_id(f) in bdnb_ids]
+    if bdnb_matches:
+        for f in bdnb_matches: reasons[parcel_id(f)]="Liée au bâtiment/adresse dans la BDNB"
+        return bdnb_matches[:3],reasons,"élevée","BDNB",{"cadastre":cerr,"bdnb":bdnb_meta},candidates
+
+    rev,rerr=reverse_parcel(lon,lat); rid=reverse_ids(rev)
+    matched=[(d,f) for d,f in candidates if parcel_id(f) in rid]
+    matched.sort(key=lambda x:x[0])
+    if matched:
+        min_d=matched[0][0]; threshold=min_d+1.35
+        strict=[f for d,f in matched if d<=threshold][:3]
+        for f in strict: reasons[parcel_id(f)]="Géocodage inverse IGN + filtre strict de proximité"
+        return strict,reasons,"moyenne","IGN reverse strict",{"cadastre":cerr,"reverse":rerr,"bdnb":bdnb_meta},candidates
+
+    if candidates:
+        d,f=candidates[0]; reasons[parcel_id(f)]=f"Parcelle la plus proche (~{d:.1f} m), à confirmer"
+        return [f],reasons,"faible","fallback proximité",{"cadastre":cerr,"reverse":rerr,"bdnb":bdnb_meta},candidates
+    return [],reasons,"faible","échec",{"cadastre":cerr,"reverse":rerr,"bdnb":bdnb_meta},candidates
 
 def union_geom(features):
     return unary_union([shape(f["geometry"]) for f in features]).simplify(0.000001,preserve_topology=True)
@@ -229,7 +276,7 @@ def card(name,x):
     <div style="font-size:1.05rem;font-weight:750">{x['status']} {name}</div><div style="color:#374151;margin-top:5px">{x['label']}</div>{details}
     <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Source : {x['source']}{lvl}<br>Portée : {x['scope']} · Confiance : {x['confidence']}<br>Vérifié : {x['checked_at']}</div></div>""",unsafe_allow_html=True)
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.3.1</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.3.2</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
 st.write("PRM identifie automatiquement le périmètre probable puis explique et source chaque feu.")
 
@@ -241,7 +288,7 @@ if go:
     with st.spinner("Identification de la propriété et analyse…"):
         geo,gerr=geocode(address)
         if not geo:st.error(gerr);st.stop()
-        selected,reasons,resolver_conf,resolver_errors,candidates=auto_resolve(geo["lon"],geo["lat"])
+        selected,reasons,resolver_conf,resolver_source,resolver_errors,candidates=auto_resolve(address,geo["lon"],geo["lat"])
         if not selected:st.error("PRM n’a pas pu identifier de parcelle probable.");st.stop()
         geom=union_geom(selected)
         urbanism,uerrors=get_urbanism(geom)
@@ -267,9 +314,9 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.3.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.3.2</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) retenue(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
-    <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Confiance identification : {resolver_conf}</div>
+    <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div><div style="color:#d1d5db;margin-top:5px">{oranges} vigilances · {reds} fortes vigilances · {greys} points non évalués</div></div>""",unsafe_allow_html=True)
 
     c1,c2=st.columns(2)
@@ -289,7 +336,7 @@ if go:
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
     st.subheader("Traçabilité PRM"); st.write("Chaque feu affiche sa source, son niveau lorsqu’il est identifiable, sa portée, la confiance et la date de vérification.")
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"confidence":resolver_conf,"parcels":rows,"reasons":reasons,"errors":resolver_errors},"risks":cats,"urbanism":{"zones":zones,"prescription_count":n_presc},"errors":{"georisques":rerr,"gpu":uerrors}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows,"reasons":reasons,"errors":resolver_errors},"risks":cats,"urbanism":{"zones":zones,"prescription_count":n_presc},"errors":{"georisques":rerr,"gpu":uerrors}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.3.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v031.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.3.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v032.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Ne remplace pas les diagnostics, études, états réglementaires ou conseils professionnels applicables.")
