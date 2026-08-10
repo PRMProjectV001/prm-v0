@@ -947,12 +947,17 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
     )
 
     story=[]
-    story.append(Paragraph("PROPERTY RISK MANAGEMENT", small))
-    story.append(Paragraph("Rapport décisionnel PRM", title))
+    story.append(Paragraph("PROPERTY INTELLIGENCE", small))
+    story.append(Paragraph("Rapport d’analyse immobilière", title))
     story.append(Paragraph(pdf_safe(geo.get("label")), h1))
     parcel_txt=", ".join(r.get("Parcelle","") for r in rows)
     story.append(Paragraph(
         pdf_safe(f"Parcelle(s) : {parcel_txt} | Resolver : {resolver_source} | Confiance : {resolver_conf}"),
+        small
+    ))
+    story.append(Paragraph(
+        "Synthèse automatisée des données publiques et des éléments fournis par l’utilisateur, "
+        "structurée pour préparer une décision immobilière.",
         small
     ))
     story.append(Spacer(1,5*mm))
@@ -1014,7 +1019,7 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
     ]))
     story.append(rt)
 
-    story.append(Paragraph("Contraintes et contexte", h1))
+    story.append(Paragraph("Contexte et contraintes", h1))
     for line in context_lines:
         story.append(Paragraph(pdf_safe("- "+line),body))
 
@@ -1032,7 +1037,7 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
             )
             story.append(Paragraph(pdf_safe("- "+line),body))
 
-    story.append(Paragraph("Points à vérifier avant décision", h1))
+    story.append(Paragraph("Vérifications avant décision", h1))
     for line in verify_lines[:7]:
         story.append(Paragraph(pdf_safe("- "+line),body))
 
@@ -1050,7 +1055,7 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
         canvas.saveState()
         canvas.setFont("Helvetica",7)
         canvas.setFillColor(colors.HexColor("#9CA3AF"))
-        canvas.drawString(16*mm,8*mm,"PRM V0.9.1 - Rapport décisionnel")
+        canvas.drawString(16*mm,8*mm,"PRM V1.0A - Rapport décisionnel")
         canvas.drawRightString(A4[0]-16*mm,8*mm,f"Page {doc.page}")
         canvas.restoreState()
 
@@ -1503,14 +1508,14 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.9.1</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V1.0A</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.9.1 sépare strictement les constats à surveiller des actions concrètes avant décision.")
+st.write("V1.0A affine l’expérience produit, le parcours utilisateur et la restitution PDF sans figer la marque finale.")
 
 
-st.subheader("📷 Photos du bien — optionnel")
+st.subheader("📷 Compléter avec des photos — optionnel")
 st.caption(
-    "Ajoutez idéalement 3 à 6 photos : façade/jardin, toiture-gouttières, limites du terrain et végétation proche. "
+    "Ajoutez idéalement 3 à 6 photos si vous souhaitez compléter l’analyse visuelle : façade/jardin, toiture-gouttières, limites du terrain et végétation proche. "
     "V0.6 ne fait pas de reconnaissance automatique : vous confirmez les éléments visibles dans la grille après l’analyse."
 )
 veg_photos = st.file_uploader(
@@ -1525,6 +1530,11 @@ if veg_photos:
         with preview_cols[i % len(preview_cols)]:
             st.image(p,caption=p.name,use_container_width=True)
 
+
+st.info(
+    "PRM distingue volontairement ce qui est **mesuré/interprété**, ce qui relève du **contexte**, "
+    "et ce qui reste **à confirmer**. L’objectif est d’éviter les faux signaux de sécurité comme les fausses alertes."
+)
 
 with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
@@ -1699,7 +1709,7 @@ if analysis_active:
         verify_lines.append("Aucun point majeur non résolu dans les données actuellement interprétées.")
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.9.1</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V1.0A</div>
     <div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
@@ -1920,7 +1930,7 @@ if analysis_active:
                   "premium":premium
               },"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
 
-    st.subheader("📄 Rapport PRM")
+    st.subheader("📄 Votre rapport décisionnel")
     report_pdf=build_prm_pdf(
         geo,rows,gs,gl,headline_reason,cats,
         context_lines,future_lines,verify_lines,
@@ -1930,20 +1940,23 @@ if analysis_active:
     d1,d2=st.columns(2)
     with d1:
         st.download_button(
-            "Télécharger le rapport PDF V0.9.1",
+            "Télécharger le rapport PDF",
             data=report_pdf,
-            file_name="rapport_prm_v091.pdf",
+            file_name="rapport_prm_v10a.pdf",
             mime="application/pdf",
             use_container_width=True
         )
     with d2:
         st.download_button(
-            "Télécharger le snapshot JSON V0.9.1",
+            "Télécharger les données techniques JSON",
             data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),
-            file_name="prm_snapshot_v091.json",
+            file_name="prm_snapshot_v10a.json",
             mime="application/json",
             use_container_width=True
         )
 
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
+    st.caption(
+    "Outil d’aide à la décision. Les éléments déterminants doivent être confirmés auprès des administrations, "
+    "documents opposables ou professionnels compétents avant engagement."
+)
