@@ -216,6 +216,58 @@ def subtree_text(ss):
     for s in ss:walk(s)
     return norm(" | ".join(vals))
 
+
+def report_text(report):
+    """Flatten the complete Géorisques payload, keys + scalar values."""
+    vals=[]
+    def walk(x):
+        if isinstance(x,dict):
+            for k,v in x.items():
+                vals.append(str(k))
+                walk(v)
+        elif isinstance(x,list):
+            for v in x:
+                walk(v)
+        elif isinstance(x,(str,int,float,bool)):
+            vals.append(str(x))
+    walk(report)
+    return norm(" | ".join(vals))
+
+def first_int(text, patterns, low, high):
+    for pat in patterns:
+        m=re.search(pat,text,re.I)
+        if m:
+            try:
+                n=int(m.group(1))
+                if low <= n <= high:
+                    return n
+            except Exception:
+                pass
+    return None
+
+def nearby_count(text, label_patterns, max_radius=500):
+    """
+    Extract explicit wording such as:
+      '50 ancien(s) site(s) ... à moins de 500 m'
+      '2 installation(s) ... à moins de 500 m'
+    Only returns a count when the report explicitly ties it to a distance.
+    """
+    for lab in label_patterns:
+        patterns=[
+            rf"(\d+)\s+{lab}.{{0,120}}(?:a|à)\s+moins\s+de\s+(\d+)\s*m",
+            rf"(\d+)\s+{lab}.{{0,120}}dans\s+un\s+rayon\s+de\s+(\d+)\s*m",
+        ]
+        for pat in patterns:
+            m=re.search(pat,text,re.I)
+            if m:
+                try:
+                    count=int(m.group(1)); radius=int(m.group(2))
+                    if radius <= max_radius:
+                        return count,radius
+                except Exception:
+                    pass
+    return None,None
+
 def scale(text,den):
     m=re.search(rf"\b([1-{den}])\s*/\s*{den}\b",text)
     if m:return int(m.group(1))
@@ -230,18 +282,84 @@ def item(status,label,source="Géorisques",scope="adresse",confidence="moyenne",
     return {"status":status,"label":label,"source":source,"scope":scope,"confidence":confidence,"official_level":official_level,"details":details or [],"checked_at":now_fr()}
 
 def classify_radon(report):
-    t=subtree_text(subtrees(report,["radon"])); n=scale(t,3) if t else None
-    if n==1 or "potentiel radon faible" in t:return item("🟢","Potentiel radon faible",official_level="1/3")
-    if n==2:return item("🟠","Potentiel radon intermédiaire",official_level="2/3")
-    if n==3:return item("🔴","Potentiel radon élevé",official_level="3/3")
-    return item("⚪","Radon mentionné, niveau non interprétable",confidence="faible")
+    # Prefer the complete official report wording. Radon is a commune-level
+    # regulatory potential (1/3 to 3/3), not a parcel measurement.
+    full=report_text(report)
+    local=subtree_text(subtrees(report,["radon"]))
+    t=full+" | "+local
+
+    n=first_int(t,[
+        r"potentiel\s+radon\s+(?:est|de|:)?\s*(?:de\s*)?([1-3])\s*/\s*3",
+        r"radon.{0,120}?([1-3])\s*/\s*3",
+        r"niveau\s+radon\s*[:=]?\s*([1-3])",
+    ],1,3)
+    if n is None:
+        n=scale(local,3) if local else None
+
+    if n==1 or "potentiel radon faible" in t:
+        return item(
+            "🟢","Potentiel radon faible",
+            scope="commune",confidence="élevée",official_level="1/3",
+            details=["Échelle réglementaire Géorisques : 1/3."]
+        )
+    if n==2 or "potentiel radon moyen" in t or "potentiel radon intermédiaire" in t:
+        return item(
+            "🟠","Potentiel radon intermédiaire",
+            scope="commune",confidence="élevée",official_level="2/3",
+            details=["Échelle réglementaire Géorisques : 2/3."]
+        )
+    if n==3 or "potentiel radon élevé" in t or "potentiel radon eleve" in t:
+        return item(
+            "🔴","Potentiel radon élevé",
+            scope="commune",confidence="élevée",official_level="3/3",
+            details=[
+                "Échelle réglementaire Géorisques : 3/3.",
+                "Le potentiel radon décrit le territoire ; la concentration réelle dans un bâtiment nécessite une mesure."
+            ]
+        )
+    return item(
+        "⚪","Niveau radon officiel non extrait",
+        scope="commune",confidence="faible",
+        details=["PRM n’invente pas de niveau lorsque l’échelle réglementaire n’est pas lisible dans la réponse Géorisques."]
+    )
 
 def classify_seisme(report):
-    t=subtree_text(subtrees(report,["séisme","seisme","sismique"])); n=scale(t,5) if t else None
-    if n in [1,2]:return item("🟢","Sismicité faible",official_level=f"{n}/5")
-    if n==3:return item("🟠","Sismicité modérée",official_level="3/5")
-    if n in [4,5]:return item("🔴","Sismicité forte",official_level=f"{n}/5")
-    return item("⚪","Séisme mentionné, niveau non interprétable",confidence="faible")
+    # Official regulatory seismic zoning: 1/5 to 5/5.
+    full=report_text(report)
+    local=subtree_text(subtrees(report,["séisme","seisme","sismique"]))
+    t=full+" | "+local
+
+    n=first_int(t,[
+        r"risque\s+sismique\s+(?:est|de|:)?\s*(?:de\s*)?([1-5])\s*/\s*5",
+        r"sismicite.{0,120}?([1-5])\s*/\s*5",
+        r"sismicité.{0,120}?([1-5])\s*/\s*5",
+        r"seisme.{0,120}?([1-5])\s*/\s*5",
+        r"séisme.{0,120}?([1-5])\s*/\s*5",
+    ],1,5)
+    if n is None:
+        n=scale(local,5) if local else None
+
+    labels={
+        1:("🟢","Sismicité très faible"),
+        2:("🟢","Sismicité faible"),
+        3:("🟠","Sismicité modérée"),
+        4:("🟠","Sismicité moyenne"),
+        5:("🔴","Sismicité forte"),
+    }
+    if n in labels:
+        status,label=labels[n]
+        details=[f"Zonage réglementaire Géorisques : {n}/5."]
+        if n >= 2:
+            details.append("Des règles parasismiques peuvent s’appliquer selon le type de bâtiment et les travaux.")
+        return item(
+            status,label,scope="adresse / zonage communal",
+            confidence="élevée",official_level=f"{n}/5",details=details
+        )
+    return item(
+        "⚪","Zonage sismique officiel non extrait",
+        scope="adresse / zonage communal",confidence="faible",
+        details=["PRM suspend la conclusion plutôt que d’interpréter une simple mention du risque."]
+    )
 
 def classify_argile(report):
     t=subtree_text(subtrees(report,["argile","retrait gonflement","gonflement"])); n=scale(t,3) if t else None
@@ -262,13 +380,86 @@ def classify_mouvements(report):
     return item("⚪","Aucun événement précis récupéré" if not t else "Historique présent, exposition parcellaire non prouvée",confidence="faible")
 
 def classify_tech(report):
-    groups=[("SEVESO",["seveso"]),("ICPE / installation classée",["installation classée","installation classee","icpe"]),("Canalisation de transport",["canalisation"]),("Risque nucléaire",["nucléaire","nucleaire"])]
-    detected=[]
-    for label,aliases in groups:
-        if subtree_text(subtrees(report,aliases)):detected.append(label)
-    if not detected:return item("🟢","Aucun signal technologique majeur extrait")
-    return item("⚪","Objet technologique mentionné, distance non interprétable",confidence="faible",details=[f"Type détecté : {x}" for x in detected])
+    """
+    Avoid false positives caused by generic report headings.
+    We only elevate a technological signal when the report contains an explicit
+    statement, count, or proximity wording.
+    """
+    t=report_text(report)
 
+    details=[]
+    statuses=[]
+
+    # ICPE: explicit counts or wording.
+    icpe_commune=None
+    patterns=[
+        r"(\d+)\s+installation\(s\)\s+classée\(s\).{0,160}?sur\s+la\s+commune",
+        r"(\d+)\s+installation(?:s)?\s+class[ée]e(?:s)?.{0,160}?sur\s+la\s+commune",
+    ]
+    for pat in patterns:
+        m=re.search(pat,t,re.I)
+        if m:
+            icpe_commune=int(m.group(1)); break
+
+    icpe_near,icpe_radius=nearby_count(
+        t,[r"installation(?:s)?\s+class[ée]e(?:s)?",r"icpe(?:s)?"]
+    )
+
+    if icpe_near is not None:
+        details.append(f"ICPE : {icpe_near} installation(s) explicitement signalée(s) à moins de {icpe_radius} m.")
+        statuses.append("🟠" if icpe_near > 0 else "🟢")
+    elif icpe_commune is not None:
+        details.append(f"ICPE : {icpe_commune} installation(s) signalée(s) à l’échelle de la commune ; distance au bien non fournie.")
+        statuses.append("⚪" if icpe_commune > 0 else "🟢")
+    elif re.search(r"installation(?:s)?\s+industrielle(?:s)?\s+class[ée]e(?:s)?.{0,180}?(?:aucune|0)",t,re.I):
+        details.append("ICPE : aucun établissement explicitement signalé dans le passage exploitable.")
+        statuses.append("🟢")
+
+    # Dangerous-material pipelines: report may identify the theme without giving distance.
+    pipeline_explicit=bool(re.search(
+        r"canalisation(?:s)?\s+de\s+transport\s+de\s+mati[eè]res?\s+dangereuses?",
+        t,re.I
+    ))
+    pipe_near,pipe_radius=nearby_count(
+        t,[r"canalisation(?:s)?(?:\s+de\s+transport)?"]
+    )
+    if pipe_near is not None:
+        details.append(f"Canalisation : {pipe_near} objet(s) explicitement signalé(s) à moins de {pipe_radius} m.")
+        statuses.append("🟠" if pipe_near > 0 else "🟢")
+    elif pipeline_explicit:
+        details.append("Canalisation de transport : rubrique présente, mais aucune distance exploitable n’est fournie dans la réponse.")
+        statuses.append("⚪")
+
+    # Nuclear: require explicit exposure wording; do not treat a generic word occurrence as local exposure.
+    nuclear_local=bool(re.search(
+        r"(?:risque|installation|centrale).{0,80}nucl[ée]aire.{0,180}?(?:adresse|commune|moins de|rayon|concern)",
+        t,re.I
+    ))
+    if nuclear_local:
+        details.append("Nucléaire : signal local explicite trouvé dans le rapport ; distance à confirmer si elle n’est pas chiffrée.")
+        statuses.append("⚪")
+
+    if not details:
+        return item(
+            "🟢","Aucun signal technologique local exploitable extrait",
+            confidence="moyenne",
+            details=["Les simples titres ou rubriques génériques du rapport ne sont plus considérés comme une exposition."]
+        )
+
+    if "🟠" in statuses:
+        return item(
+            "🟠","Signal technologique de proximité à vérifier",
+            confidence="moyenne",details=details
+        )
+    if all(s=="🟢" for s in statuses):
+        return item(
+            "🟢","Aucun signal technologique significatif extrait",
+            confidence="moyenne",details=details
+        )
+    return item(
+        "⚪","Contexte technologique identifié, proximité non établie",
+        confidence="moyenne",details=details
+    )
 
 
 # ---------------- Stabilisation des risques ----------------
@@ -788,9 +979,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.1</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.2</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.7.1 intègre le résultat de l’inspection végétation dans le résumé PRM et stabilise l’interactivité Streamlit.")
+st.write("V0.7.2 renforce l’interprétation officielle du radon, du séisme et des risques technologiques Géorisques.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -889,7 +1080,7 @@ if analysis_active:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.2</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -1041,5 +1232,5 @@ if analysis_active:
 
     snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.7.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v071.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.7.2",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v072.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
