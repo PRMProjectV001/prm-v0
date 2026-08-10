@@ -547,6 +547,136 @@ def classify_seisme_text(pdf_text):
     return None
 
 
+def extract_tech_pdf_signals(pdf_text):
+    """
+    Extract only explicit local/proximity technological signals from the
+    official Géorisques PDF. Generic headings are ignored.
+    """
+    t=norm(pdf_text or "")
+    signals=[]
+
+    # ICPE explicit proximity/count wording.
+    icpe_patterns=[
+        r"(\d+)\s+installation(?:s)?\s+class[ée]e(?:s)?.{0,180}?(?:a|à)\s+moins\s+de\s+(\d+)\s*m",
+        r"(\d+)\s+icpe(?:s)?.{0,180}?(?:a|à)\s+moins\s+de\s+(\d+)\s*m",
+        r"(\d+)\s+installation(?:s)?\s+class[ée]e(?:s)?.{0,180}?dans\s+un\s+rayon\s+de\s+(\d+)\s*m",
+    ]
+    for pat in icpe_patterns:
+        m=re.search(pat,t,re.I)
+        if m:
+            signals.append({
+                "type":"ICPE",
+                "count":int(m.group(1)),
+                "radius_m":int(m.group(2)),
+                "explicit":True
+            })
+            break
+
+    # Some Géorisques reports phrase the absence explicitly.
+    if not any(s["type"]=="ICPE" for s in signals):
+        if re.search(
+            r"(?:aucune|0)\s+installation(?:s)?\s+class[ée]e(?:s)?.{0,160}?(?:moins de|rayon)",
+            t,re.I
+        ):
+            signals.append({"type":"ICPE","count":0,"radius_m":500,"explicit":True})
+
+    # Pipelines: only accept explicit distance/radius wording.
+    pipe_patterns=[
+        r"canalisation(?:s)?\s+de\s+transport.{0,220}?(?:a|à)\s+moins\s+de\s+(\d+)\s*m",
+        r"canalisation(?:s)?\s+de\s+transport.{0,220}?dans\s+un\s+rayon\s+de\s+(\d+)\s*m",
+        r"distance.{0,80}?canalisation.{0,80}?(\d+)\s*m",
+    ]
+    for pat in pipe_patterns:
+        m=re.search(pat,t,re.I)
+        if m:
+            signals.append({
+                "type":"Canalisation",
+                "distance_or_radius_m":int(m.group(1)),
+                "explicit":True
+            })
+            break
+
+    # Nuclear: require explicit address/commune-level concern or distance.
+    nuc_distance=re.search(
+        r"(?:installation|centrale|risque)\s+nucl[ée]aire.{0,220}?(?:a|à)\s+moins\s+de\s+(\d+)\s*(?:m|km)",
+        t,re.I
+    )
+    if nuc_distance:
+        raw=int(nuc_distance.group(1))
+        snippet=nuc_distance.group(0)
+        dist_m=raw*1000 if "km" in snippet.lower() else raw
+        signals.append({
+            "type":"Nucléaire",
+            "distance_or_radius_m":dist_m,
+            "explicit":True
+        })
+    elif re.search(
+        r"(?:commune|adresse).{0,120}?(?:concern[ée]e?|soumise).{0,120}?nucl[ée]aire",
+        t,re.I
+    ):
+        signals.append({"type":"Nucléaire","local":True,"explicit":True})
+
+    return signals
+
+def classify_tech_pdf(pdf_text):
+    signals=extract_tech_pdf_signals(pdf_text)
+    if not signals:
+        return None
+
+    details=[]
+    severity="🟢"
+
+    for s in signals:
+        typ=s["type"]
+
+        if typ=="ICPE":
+            count=s.get("count")
+            radius=s.get("radius_m")
+            if count==0:
+                details.append(f"ICPE : aucune installation explicitement signalée dans le rayon de {radius} m.")
+            elif count is not None and radius:
+                details.append(f"ICPE : {count} installation(s) explicitement signalée(s) dans un rayon de {radius} m.")
+                if radius<=500 and count>0:
+                    severity="🟠"
+
+        elif typ=="Canalisation":
+            d=s.get("distance_or_radius_m")
+            details.append(f"Canalisation de transport : proximité explicitement mentionnée à environ {d} m ou dans ce rayon.")
+            if d is not None and d<=500:
+                severity="🟠"
+
+        elif typ=="Nucléaire":
+            d=s.get("distance_or_radius_m")
+            if d is not None:
+                details.append(f"Nucléaire : signal explicite dans le rapport à environ {d/1000:.1f} km.")
+                if d<=5000:
+                    severity="🟠"
+            else:
+                details.append("Nucléaire : le rapport signale explicitement un contexte local, sans distance exploitable.")
+                if severity=="🟢":
+                    severity="⚪"
+
+    if severity=="🟠":
+        return item(
+            "🟠","Signal technologique de proximité explicitement documenté",
+            scope="adresse / proximité",confidence="élevée",
+            details=details+["Lecture extraite du rapport PDF officiel Géorisques."]
+        )
+
+    if severity=="⚪":
+        return item(
+            "⚪","Contexte technologique local documenté, distance à préciser",
+            scope="adresse / commune",confidence="moyenne",
+            details=details+["Lecture extraite du rapport PDF officiel Géorisques."]
+        )
+
+    return item(
+        "🟢","Aucun signal technologique proche extrait du rapport",
+        scope="adresse / proximité",confidence="moyenne",
+        details=details+["Lecture extraite du rapport PDF officiel Géorisques."]
+    )
+
+
 # ---------------- Stabilisation des risques ----------------
 STATUS_RANK={"🟢":0,"⚪":1,"🟠":2,"🔴":3}
 
@@ -1064,9 +1194,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.3</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.4</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.7.3 lit aussi le rapport PDF officiel Géorisques afin d’extraire les échelles radon et séisme lorsqu’elles ne sont pas présentes dans le JSON.")
+st.write("V0.7.4 exploite aussi le rapport PDF officiel Géorisques pour qualifier la proximité des risques technologiques lorsque des distances ou comptages explicites sont disponibles.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1122,6 +1252,7 @@ if analysis_active:
     # V0.7.3 — use the official generated PDF as a fallback for regulatory scales.
     radon_pdf=classify_radon_text(pdf_text)
     seisme_pdf=classify_seisme_text(pdf_text)
+    tech_pdf=classify_tech_pdf(pdf_text)
 
     if radon_pdf:
         stable_risks["Radon"]=radon_pdf
@@ -1135,6 +1266,13 @@ if analysis_active:
     else:
         stable_risks["Séisme"]["details"].append(
             "Rapport PDF officiel consulté, mais zonage sismique non extrait automatiquement."
+        )
+
+    if tech_pdf:
+        stable_risks["Risques technologiques"]=tech_pdf
+    else:
+        stable_risks["Risques technologiques"]["details"].append(
+            "Rapport PDF officiel consulté : aucune distance technologique explicite supplémentaire extraite."
         )
 
     # V0.7.1 — read persisted checkbox state before building the main PRM cards.
@@ -1184,7 +1322,7 @@ if analysis_active:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.3</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.4</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -1336,5 +1474,5 @@ if analysis_active:
 
     snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.7.3",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v073.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.7.4",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v074.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
