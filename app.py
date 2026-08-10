@@ -2,6 +2,8 @@ import json, re, math
 from datetime import datetime, timezone
 import pandas as pd
 import requests
+from pypdf import PdfReader
+from io import BytesIO
 import streamlit as st
 from shapely.geometry import Point, shape, mapping
 from shapely.ops import unary_union
@@ -13,6 +15,7 @@ GEOCODE_REVERSE="https://data.geopf.fr/geocodage/reverse"
 CADASTRE_URL="https://apicarto.ign.fr/api/cadastre/parcelle"
 GPU_BASE="https://apicarto.ign.fr/api/gpu"
 GEORISQUES_REPORT="https://georisques.gouv.fr/api/v1/resultats_rapport_risque"
+GEORISQUES_PDF="https://georisques.gouv.fr/api/v1/rapport_pdf"
 BDNB_BASE="https://api.bdnb.io/v1/bdnb"
 DATAFAIR_BASE="https://opendata.koumoul.com/data-fair/api/v1/datasets"
 TIMEOUT=22
@@ -460,6 +463,88 @@ def classify_tech(report):
         "⚪","Contexte technologique identifié, proximité non établie",
         confidence="moyenne",details=details
     )
+
+
+
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_georisques_pdf_text(lon,lat):
+    """
+    Read the official Géorisques PDF report for the exact geocoded point.
+    This report often exposes regulatory wording (radon x/3, seismicity x/5)
+    more explicitly than the JSON response.
+    """
+    try:
+        r=requests.get(
+            GEORISQUES_PDF,
+            params={"latlon":f"{lon},{lat}"},
+            timeout=TIMEOUT
+        )
+        r.raise_for_status()
+        reader=PdfReader(BytesIO(r.content))
+        chunks=[]
+        for page in reader.pages:
+            try:
+                txt=page.extract_text() or ""
+                if txt:
+                    chunks.append(txt)
+            except Exception:
+                continue
+        return norm(" | ".join(chunks)), None
+    except Exception as e:
+        return "", f"{type(e).__name__}: {e}"
+
+def classify_radon_text(pdf_text):
+    t=norm(pdf_text or "")
+    n=first_int(t,[
+        r"potentiel\s+radon\s+(?:est|de|:)?\s*(?:de\s*)?([1-3])\s*/\s*3",
+        r"radon.{0,140}?([1-3])\s*/\s*3",
+    ],1,3)
+    labels={
+        1:("🟢","Potentiel radon faible"),
+        2:("🟠","Potentiel radon intermédiaire"),
+        3:("🔴","Potentiel radon élevé"),
+    }
+    if n in labels:
+        status,label=labels[n]
+        details=[
+            f"Échelle réglementaire Géorisques : {n}/3.",
+            "Lecture extraite du rapport PDF officiel généré pour le point géocodé."
+        ]
+        if n==3:
+            details.append("Le potentiel territorial ne remplace pas une mesure de concentration dans le bâtiment.")
+        return item(
+            status,label,scope="commune",confidence="élevée",
+            official_level=f"{n}/3",details=details
+        )
+    return None
+
+def classify_seisme_text(pdf_text):
+    t=norm(pdf_text or "")
+    n=first_int(t,[
+        r"risque\s+sismique\s+(?:est|de|:)?\s*(?:de\s*)?([1-5])\s*/\s*5",
+        r"sismicite.{0,140}?([1-5])\s*/\s*5",
+        r"sismicité.{0,140}?([1-5])\s*/\s*5",
+    ],1,5)
+    labels={
+        1:("🟢","Sismicité très faible"),
+        2:("🟢","Sismicité faible"),
+        3:("🟠","Sismicité modérée"),
+        4:("🟠","Sismicité moyenne"),
+        5:("🔴","Sismicité forte"),
+    }
+    if n in labels:
+        status,label=labels[n]
+        details=[
+            f"Zonage réglementaire Géorisques : {n}/5.",
+            "Lecture extraite du rapport PDF officiel généré pour le point géocodé."
+        ]
+        if n>=2:
+            details.append("Des règles parasismiques peuvent s’appliquer selon le bâtiment et les travaux.")
+        return item(
+            status,label,scope="adresse / zonage communal",confidence="élevée",
+            official_level=f"{n}/5",details=details
+        )
+    return None
 
 
 # ---------------- Stabilisation des risques ----------------
@@ -979,9 +1064,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.2</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.3</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.7.2 renforce l’interprétation officielle du radon, du séisme et des risques technologiques Géorisques.")
+st.write("V0.7.3 lit aussi le rapport PDF officiel Géorisques afin d’extraire les échelles radon et séisme lorsqu’elles ne sont pas présentes dans le JSON.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1026,12 +1111,31 @@ if analysis_active:
         geom=union_geom(selected)
         urbanism,uerrors=get_urbanism(geom)
         reports,rerrs=get_reports_stable(geo["lon"],geo["lat"])
+        pdf_text,pdf_error=get_georisques_pdf_text(geo["lon"],geo["lat"])
         projects,project_errors=get_projects(geo["lat"],geo["lon"],geo.get("citycode"),geo.get("city"),run_radius)
         climate_profile=climate_2050_profile(geo)
 
     rows=[row(f,candidates) for f in selected];zones=zone_labels(urbanism.get("zones",[]))
     n_presc=sum(len(urbanism.get(k,[])) for k in ["prescriptions_surface","prescriptions_line","prescriptions_point","infos_surface"])
     stable_risks=stable_current_risks(reports)
+
+    # V0.7.3 — use the official generated PDF as a fallback for regulatory scales.
+    radon_pdf=classify_radon_text(pdf_text)
+    seisme_pdf=classify_seisme_text(pdf_text)
+
+    if radon_pdf:
+        stable_risks["Radon"]=radon_pdf
+    else:
+        stable_risks["Radon"]["details"].append(
+            "Rapport PDF officiel consulté, mais échelle radon non extraite automatiquement."
+        )
+
+    if seisme_pdf:
+        stable_risks["Séisme"]=seisme_pdf
+    else:
+        stable_risks["Séisme"]["details"].append(
+            "Rapport PDF officiel consulté, mais zonage sismique non extrait automatiquement."
+        )
 
     # V0.7.1 — read persisted checkbox state before building the main PRM cards.
     # This allows the vegetation result to update immediately after any checkbox interaction.
@@ -1080,7 +1184,7 @@ if analysis_active:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.2</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.3</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -1230,7 +1334,7 @@ if analysis_active:
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.7.2",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v072.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.7.3",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v073.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
