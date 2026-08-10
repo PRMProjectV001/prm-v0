@@ -1194,9 +1194,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.4</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.8</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.7.4 exploite aussi le rapport PDF officiel Géorisques pour qualifier la proximité des risques technologiques lorsque des distances ou comptages explicites sont disponibles.")
+st.write("V0.8 sépare la décision immobilière en risques actuels, contraintes/contexte, adaptation future et points à vérifier.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1315,17 +1315,110 @@ if analysis_active:
         "Climat 2050":item("🟠" if climate_profile.get("available") else "⚪","Adaptation à anticiper" if climate_profile.get("available") else "Données locales à compléter",source="Météo-France / TRACC",scope="région / département",confidence="élevée" if climate_profile.get("available") else "moyenne"),
         "Végétation / vulnérabilité feu":vegetation_card
     }
-    reds=sum(x["status"]=="🔴" for x in cats.values());oranges=sum(x["status"]=="🟠" for x in cats.values())
-    if reds:gs,gl="🔴","VIGILANCE FORTE"
-    elif oranges>=2:gs,gl="🟠","VIGILANCE"
-    elif oranges==1:gs,gl="🟠","VIGILANCE LIMITÉE"
-    else:gs,gl="⚪","DONNÉES À COMPLÉTER"
+    # ---------------- V0.8 — moteur de synthèse décisionnelle ----------------
+    current_names=[
+        "Inondation / nappe","Argiles / sols","Mouvements / cavités",
+        "Séisme","Radon","Risques technologiques","Végétation / vulnérabilité feu"
+    ]
+    current_items={k:cats[k] for k in current_names}
+
+    current_red=[k for k,v in current_items.items() if v["status"]=="🔴"]
+    current_orange=[k for k,v in current_items.items() if v["status"]=="🟠"]
+    current_gray=[k for k,v in current_items.items() if v["status"]=="⚪"]
+
+    # Le bandeau est désormais piloté uniquement par les risques actuels.
+    if current_red:
+        gs,gl="🔴","VIGILANCE FORTE"
+        headline_reason=f"{len(current_red)} risque(s) actuel(s) en niveau rouge."
+    elif current_orange:
+        gs,gl="🟠","VIGILANCE"
+        headline_reason=f"{len(current_orange)} point(s) de risque actuel à examiner."
+    elif current_gray:
+        gs,gl="🟢","SITUATION PLUTÔT FAVORABLE"
+        headline_reason=f"Aucune alerte rouge/orange sur les risques interprétés · {len(current_gray)} point(s) restent à compléter."
+    else:
+        gs,gl="🟢","SITUATION PLUTÔT FAVORABLE"
+        headline_reason="Aucune alerte rouge/orange détectée sur les risques actuels analysés."
+
+    priority_projects=[p for p in projects if p["priority"]<=1]
+
+    context_lines=[]
+    if zones:
+        context_lines.append(f"Urbanisme : zonage {', '.join(zones[:3])}.")
+    else:
+        context_lines.append("Urbanisme : zonage non récupéré.")
+
+    if n_presc:
+        context_lines.append(f"{n_presc} prescription(s) / information(s) GPU intersectante(s).")
+    else:
+        context_lines.append("Aucune prescription/information GPU particulière détectée sur les parcelles.")
+
+    if priority_projects:
+        nearest=min(priority_projects,key=lambda p:p["distance_m"])
+        context_lines.append(
+            f"{len(priority_projects)} autorisation(s) récente(s) prioritaire(s) dans le quartier ; "
+            f"la plus proche est à {nearest['distance_m']} m."
+        )
+    else:
+        context_lines.append("Aucune autorisation récente prioritaire détectée dans le rayon analysé.")
+
+    future_lines=[]
+    if climate_profile.get("available"):
+        future_lines.append("Climat 2050 : adaptation à anticiper, sans assimilation à un risque actuel au numéro de rue.")
+        future_lines.append("Priorités : confort d’été, gestion de l’eau, pluies intenses et végétation.")
+    else:
+        future_lines.append("Climat 2050 : données territoriales locales à compléter.")
+
+    verify_lines=[]
+    for name in current_gray:
+        verify_lines.append(f"{name} : {current_items[name]['label']}.")
+    if resolver_conf!="élevée":
+        verify_lines.append(f"Parcelles : resolver {resolver_source}, confiance {resolver_conf}.")
+    if not veg_photos:
+        verify_lines.append("Végétation / feu : ajouter des photos pour une inspection visuelle.")
+    if not verify_lines:
+        verify_lines.append("Aucun point majeur non résolu dans les données actuellement interprétées.")
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.4</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.8</div>
+    <div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
-    <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
+    <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div>
+    <div style="font-size:.95rem;color:#d1d5db;margin-top:6px">{headline_reason}</div>
+    </div>""",unsafe_allow_html=True)
+
+    st.subheader("🧭 Synthèse décisionnelle")
+    s1,s2=st.columns(2)
+
+    with s1:
+        st.markdown("### Risques actuels")
+        if current_red:
+            st.error("Alerte(s) forte(s) : "+", ".join(current_red))
+        elif current_orange:
+            st.warning("Point(s) de vigilance : "+", ".join(current_orange))
+        else:
+            st.success("Aucune alerte rouge/orange sur les risques actuels interprétés.")
+        if current_gray:
+            st.caption("Données encore incomplètes : "+", ".join(current_gray))
+
+        st.markdown("### Contraintes & contexte")
+        for line in context_lines:
+            st.write("• "+line)
+
+    with s2:
+        st.markdown("### Adaptation future")
+        for line in future_lines:
+            st.write("• "+line)
+
+        st.markdown("### Points à vérifier")
+        for line in verify_lines[:6]:
+            st.write("• "+line)
+
+    st.caption(
+        "Lecture PRM : le bandeau global est désormais piloté par les risques actuels. "
+        "Urbanisme, projets voisins et climat 2050 sont présentés séparément afin de ne pas les confondre avec une exposition actuelle."
+    )
 
     c1,c2=st.columns(2)
     with c1:
@@ -1390,7 +1483,6 @@ if analysis_active:
     st.subheader("🏗 Projets & autorisations autour du bien")
     st.caption(f"Sitadel dans un rayon de {run_radius} m. Les autorisations sont diffusées mensuellement et peuvent comporter un délai de remontée.")
 
-    priority_projects=[p for p in projects if p["priority"]<=1]
     if not projects:
         st.info("Aucune autorisation géolocalisée détectée dans ce rayon.")
     else:
@@ -1472,7 +1564,16 @@ if analysis_active:
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},
+              "decision_summary":{
+                  "headline":{"status":gs,"label":gl,"reason":headline_reason},
+                  "current_red":current_red,
+                  "current_orange":current_orange,
+                  "current_gray":current_gray,
+                  "context":context_lines,
+                  "future":future_lines,
+                  "to_verify":verify_lines
+              },"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.7.4",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v074.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.8",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v08.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
