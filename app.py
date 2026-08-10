@@ -26,7 +26,7 @@ SITADEL_DATASETS = {
 
 def api_get(url,params=None):
     try:
-        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.5.1"})
+        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.6"})
         r.raise_for_status()
         return r.json(),None
     except Exception as e:
@@ -729,9 +729,87 @@ def card(name,x):
     <div style="font-size:1.05rem;font-weight:750">{x['status']} {name}</div><div style="color:#374151;margin-top:5px">{x['label']}</div>{details}
     <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Source : {x['source']}{lvl}<br>Portée : {x['scope']} · Confiance : {x['confidence']}<br>Vérifié : {x['checked_at']}</div></div>""",unsafe_allow_html=True)
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.5.1</div>',unsafe_allow_html=True)
+
+# ---------------- Inspection visuelle végétation / feu ----------------
+VEG_ITEMS = [
+    ("branches_toit", "Branches en contact ou très proches de la toiture / gouttières", 3,
+     "Élagage / éloignement à vérifier ; accumulation de feuilles et continuité vers le toit."),
+    ("vegetation_facade", "Végétation dense collée à une façade ou sous des ouvertures", 2,
+     "Créer une zone de séparation et éviter la continuité directe vers le bâti."),
+    ("dry_grass", "Herbes, feuilles ou végétation sèche visibles près du bâti", 3,
+     "Nettoyer les matières sèches et maintenir les abords immédiats."),
+    ("fuel_storage", "Bois, palettes, cartons ou combustibles stockés près de la maison", 3,
+     "Éloigner les stocks combustibles de la façade."),
+    ("hedge_continuity", "Haie / végétation continue reliant l’extérieur à la maison", 2,
+     "Rompre la continuité végétale à proximité immédiate du bâti."),
+    ("conifer", "Résineux / végétation très inflammable très proche du bâti", 2,
+     "Évaluer la distance au bâti et l’entretien."),
+    ("roof_debris", "Feuilles / aiguilles / débris visibles sur toiture ou gouttières", 3,
+     "Nettoyage régulier des toitures et gouttières."),
+    ("access", "Accès engins / voie d’approche semblant étroit ou encombré", 1,
+     "À confirmer sur place ; préserver un accès dégagé."),
+]
+
+def vegetation_assessment(selected_keys, photo_count):
+    points=0
+    findings=[]
+    lookup={k:(label,w,advice) for k,label,w,advice in VEG_ITEMS}
+    for key in selected_keys:
+        if key in lookup:
+            label,w,advice=lookup[key]
+            points+=w
+            findings.append({"key":key,"label":label,"weight":w,"advice":advice})
+
+    if photo_count == 0:
+        return {
+            "status":"⚪","label":"Photos requises","score":None,
+            "confidence":"aucune","findings":[],
+            "note":"Aucune photo fournie."
+        }
+
+    if not selected_keys:
+        return {
+            "status":"🟢","label":"Aucun facteur visuel déclaré sur les photos fournies","score":0,
+            "confidence":"faible" if photo_count < 3 else "moyenne","findings":[],
+            "note":"Ce résultat dépend uniquement des photos fournies et des éléments cochés."
+        }
+
+    if points >= 8:
+        status,label="🔴","Vulnérabilité visuelle élevée à vérifier"
+    elif points >= 4:
+        status,label="🟠","Vigilance visuelle"
+    else:
+        status,label="🟠","Quelques facteurs visuels à vérifier"
+
+    conf="faible" if photo_count < 3 else ("moyenne" if photo_count < 5 else "élevée")
+    return {
+        "status":status,"label":label,"score":points,
+        "confidence":conf,"findings":findings,
+        "note":"Évaluation visuelle indicative, non réglementaire."
+    }
+
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.6</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.5.1 stabilise les risques Géorisques par consensus multi-lecture sans modifier les autres modules.")
+st.write("V0.6 ajoute une inspection visuelle documentée de la végétation et de la vulnérabilité feu.")
+
+
+st.subheader("📷 Photos du bien — optionnel")
+st.caption(
+    "Ajoutez idéalement 3 à 6 photos : façade/jardin, toiture-gouttières, limites du terrain et végétation proche. "
+    "V0.6 ne fait pas de reconnaissance automatique : vous confirmez les éléments visibles dans la grille après l’analyse."
+)
+veg_photos = st.file_uploader(
+    "Photos de la propriété",
+    type=["jpg","jpeg","png","webp"],
+    accept_multiple_files=True,
+    help="Les photos servent de preuves visuelles dans le snapshot PRM."
+)
+if veg_photos:
+    preview_cols=st.columns(min(3,len(veg_photos)))
+    for i,p in enumerate(veg_photos[:6]):
+        with preview_cols[i % len(preview_cols)]:
+            st.image(p,caption=p.name,use_container_width=True)
+
 
 with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
@@ -762,7 +840,7 @@ if go:
         "Risques technologiques":stable_risks["Risques technologiques"],
         "Urbanisme":item("🟠" if zones else "⚪","Zonage détecté : "+", ".join(zones[:3]) if zones else "Zonage non récupéré",source="GPU / IGN",scope="parcelles",confidence="élevée" if zones else "faible",official_level=", ".join(zones[:3]) if zones else None,details=[f"{n_presc} prescription(s)/information(s) GPU intersectante(s)"]),
         "Climat 2050":item("🟠" if climate_profile.get("available") else "⚪","Adaptation à anticiper" if climate_profile.get("available") else "Données locales à compléter",source="Météo-France / TRACC",scope="région / département",confidence="élevée" if climate_profile.get("available") else "moyenne"),
-        "Végétation / vulnérabilité feu":item("⚪","Photos requises",source="Photos utilisateur",scope="propriété",confidence="aucune")
+        "Végétation / vulnérabilité feu":item("⚪","Inspection visuelle disponible plus bas",source="Photos utilisateur",scope="propriété",confidence="aucune")
     }
     reds=sum(x["status"]=="🔴" for x in cats.values());oranges=sum(x["status"]=="🟠" for x in cats.values())
     if reds:gs,gl="🔴","VIGILANCE FORTE"
@@ -771,7 +849,7 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.5.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.6</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -791,6 +869,45 @@ if go:
     cols=st.columns(2)
     for i,(name,x) in enumerate(cats.items()):
         with cols[i%2]:card(name,x)
+
+
+    st.subheader("🌿 Végétation / vulnérabilité feu — inspection visuelle")
+    st.write(
+        "Cette section ne remplace pas un diagnostic réglementaire. "
+        "Elle documente uniquement des facteurs visibles sur les photos fournies."
+    )
+
+    selected_veg=[]
+    if veg_photos:
+        st.caption(f"{len(veg_photos)} photo(s) fournie(s). Cochez uniquement ce que vous voyez réellement.")
+        for key,label,weight,advice in VEG_ITEMS:
+            if st.checkbox(label,key=f"veg_{key}"):
+                selected_veg.append(key)
+    else:
+        st.info("Ajoutez des photos en haut de la page pour activer l’inspection visuelle.")
+
+    veg_assessment=vegetation_assessment(selected_veg,len(veg_photos or []))
+
+    st.markdown(f"### {veg_assessment['status']} {veg_assessment['label']}")
+    if veg_assessment["score"] is not None:
+        st.caption(
+            f"Score visuel interne : {veg_assessment['score']} · "
+            f"Confiance : {veg_assessment['confidence']} · "
+            f"Photos : {len(veg_photos or [])}"
+        )
+
+    if veg_assessment["findings"]:
+        for f in veg_assessment["findings"]:
+            st.markdown(f"**• {f['label']}**")
+            st.write(f"À vérifier / action possible : {f['advice']}")
+    elif veg_photos:
+        st.write("Aucun facteur de vulnérabilité n’a été coché sur les photos fournies.")
+
+    st.caption(
+        "La vulnérabilité réelle dépend aussi de la végétation hors champ, du vent, de la pente, "
+        "des matériaux du bâtiment, de l’entretien et des obligations locales de débroussaillement."
+    )
+
 
     st.subheader("🏗 Projets & autorisations autour du bien")
     st.caption(f"Sitadel dans un rayon de {radius} m. Les autorisations sont diffusées mensuellement et peuvent comporter un délai de remontée.")
@@ -877,7 +994,7 @@ if go:
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.5.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v051.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.6",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v06.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
