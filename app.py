@@ -1194,9 +1194,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.8</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.8.1</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.8 sépare la décision immobilière en risques actuels, contraintes/contexte, adaptation future et points à vérifier.")
+st.write("V0.8.1 affine le wording du bandeau global et déduplique les points à vérifier.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1334,10 +1334,10 @@ if analysis_active:
         gs,gl="🟠","VIGILANCE"
         headline_reason=f"{len(current_orange)} point(s) de risque actuel à examiner."
     elif current_gray:
-        gs,gl="🟢","SITUATION PLUTÔT FAVORABLE"
+        gs,gl="🟢","AUCUNE ALERTE MAJEURE DÉTECTÉE"
         headline_reason=f"Aucune alerte rouge/orange sur les risques interprétés · {len(current_gray)} point(s) restent à compléter."
     else:
-        gs,gl="🟢","SITUATION PLUTÔT FAVORABLE"
+        gs,gl="🟢","AUCUNE ALERTE MAJEURE DÉTECTÉE"
         headline_reason="Aucune alerte rouge/orange détectée sur les risques actuels analysés."
 
     priority_projects=[p for p in projects if p["priority"]<=1]
@@ -1374,13 +1374,23 @@ if analysis_active:
         verify_lines.append(f"{name} : {current_items[name]['label']}.")
     if resolver_conf!="élevée":
         verify_lines.append(f"Parcelles : resolver {resolver_source}, confiance {resolver_conf}.")
-    if not veg_photos:
+    if not veg_photos and not any(line.startswith("Végétation / vulnérabilité feu") for line in verify_lines):
         verify_lines.append("Végétation / feu : ajouter des photos pour une inspection visuelle.")
+    # Déduplication prudente des points à vérifier, en conservant l'ordre.
+    deduped_verify=[]
+    seen_verify=set()
+    for line in verify_lines:
+        key=line.strip().lower()
+        if key not in seen_verify:
+            seen_verify.add(key)
+            deduped_verify.append(line)
+    verify_lines=deduped_verify
+
     if not verify_lines:
         verify_lines.append("Aucun point majeur non résolu dans les données actuellement interprétées.")
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.8</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.8.1</div>
     <div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
@@ -1575,5 +1585,5 @@ if analysis_active:
                   "to_verify":verify_lines
               },"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.8",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v08.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.8.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v081.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
