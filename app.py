@@ -26,7 +26,7 @@ SITADEL_DATASETS = {
 
 def api_get(url,params=None):
     try:
-        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.5"})
+        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.5.1"})
         r.raise_for_status()
         return r.json(),None
     except Exception as e:
@@ -170,7 +170,23 @@ def zone_labels(features):
     return specific or labels
 
 # ---------------- Géorisques ----------------
-def get_report(lon,lat):return api_get(GEORISQUES_REPORT,{"latlon":f"{lon},{lat}"})
+@st.cache_data(ttl=1800, show_spinner=False)
+def get_reports_stable(lon,lat):
+    """
+    Effectue plusieurs lectures du rapport Géorisques.
+    Le but n'est pas de fabriquer une moyenne, mais de détecter
+    les réponses partielles/incohérentes et de refuser de conclure.
+    """
+    reports=[]
+    errors=[]
+    for _ in range(3):
+        data,err=api_get(GEORISQUES_REPORT,{"latlon":f"{lon},{lat}"})
+        if data:
+            reports.append(data)
+        if err:
+            errors.append(err)
+    return reports,errors
+
 def norm(x):return " ".join(str(x or "").lower().split())
 
 def subtrees(obj,aliases):
@@ -252,6 +268,79 @@ def classify_tech(report):
         if subtree_text(subtrees(report,aliases)):detected.append(label)
     if not detected:return item("🟢","Aucun signal technologique majeur extrait")
     return item("⚪","Objet technologique mentionné, distance non interprétable",confidence="faible",details=[f"Type détecté : {x}" for x in detected])
+
+
+
+# ---------------- Stabilisation des risques ----------------
+STATUS_RANK={"🟢":0,"⚪":1,"🟠":2,"🔴":3}
+
+def risk_signature(x):
+    return (x.get("status"), x.get("label"), x.get("official_level"))
+
+def stable_risk(classifier,reports,risk_name):
+    """
+    Règles PRM :
+    - 0 rapport exploitable -> gris
+    - 3 lectures identiques -> résultat accepté, confiance renforcée
+    - 2 lectures identiques sur 3 -> résultat accepté, confiance moyenne
+    - désaccord sans majorité -> gris, jamais de faux vert/orange/rouge
+    """
+    if not reports:
+        return item(
+            "⚪",
+            f"{risk_name} : source momentanément indisponible",
+            confidence="aucune",
+            details=["Aucune réponse Géorisques exploitable pendant cette analyse."]
+        )
+
+    results=[]
+    for r in reports:
+        try:
+            results.append(classifier(r))
+        except Exception as e:
+            results.append(item("⚪",f"{risk_name} : lecture impossible",confidence="faible"))
+
+    counts={}
+    for res in results:
+        sig=risk_signature(res)
+        counts[sig]=counts.get(sig,0)+1
+
+    best_sig,best_count=max(counts.items(),key=lambda kv:kv[1])
+
+    if best_count>=2:
+        chosen=next(x for x in results if risk_signature(x)==best_sig)
+        chosen=dict(chosen)
+        chosen["confidence"]="élevée" if best_count==3 else "moyenne"
+        chosen["details"]=list(chosen.get("details") or [])
+        chosen["details"].append(f"Stabilité Géorisques : {best_count}/{len(results)} lectures concordantes")
+        return chosen
+
+    # No majority: do not let one transient response create a traffic light.
+    labels=[]
+    for x in results:
+        s=f"{x.get('status')} {x.get('label')}"
+        if s not in labels:
+            labels.append(s)
+    return item(
+        "⚪",
+        f"{risk_name} : données instables, conclusion suspendue",
+        confidence="faible",
+        details=[
+            "Les lectures Géorisques reçues pendant cette analyse ne concordent pas.",
+            "PRM refuse de choisir arbitrairement un niveau.",
+            "Lectures observées : "+" | ".join(labels[:3])
+        ]
+    )
+
+def stable_current_risks(reports):
+    return {
+        "Inondation / nappe":stable_risk(classify_inondation,reports,"Inondation / nappe"),
+        "Argiles / sols":stable_risk(classify_argile,reports,"Argiles / sols"),
+        "Mouvements / cavités":stable_risk(classify_mouvements,reports,"Mouvements / cavités"),
+        "Séisme":stable_risk(classify_seisme,reports,"Séisme"),
+        "Radon":stable_risk(classify_radon,reports,"Radon"),
+        "Risques technologiques":stable_risk(classify_tech,reports,"Risques technologiques"),
+    }
 
 
 # ---------------- Climat 2050 ----------------
@@ -640,9 +729,9 @@ def card(name,x):
     <div style="font-size:1.05rem;font-weight:750">{x['status']} {name}</div><div style="color:#374151;margin-top:5px">{x['label']}</div>{details}
     <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Source : {x['source']}{lvl}<br>Portée : {x['scope']} · Confiance : {x['confidence']}<br>Vérifié : {x['checked_at']}</div></div>""",unsafe_allow_html=True)
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.5</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.5.1</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.5 ajoute un module Climat 2050 fondé sur la TRACC et les projections Météo-France.")
+st.write("V0.5.1 stabilise les risques Géorisques par consensus multi-lecture sans modifier les autres modules.")
 
 with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
@@ -657,19 +746,20 @@ if go:
         if not selected:st.error("PRM n’a pas pu identifier de parcelle probable.");st.stop()
         geom=union_geom(selected)
         urbanism,uerrors=get_urbanism(geom)
-        report,rerr=get_report(geo["lon"],geo["lat"])
+        reports,rerrs=get_reports_stable(geo["lon"],geo["lat"])
         projects,project_errors=get_projects(geo["lat"],geo["lon"],geo.get("citycode"),geo.get("city"),radius)
         climate_profile=climate_2050_profile(geo)
 
     rows=[row(f,candidates) for f in selected];zones=zone_labels(urbanism.get("zones",[]))
     n_presc=sum(len(urbanism.get(k,[])) for k in ["prescriptions_surface","prescriptions_line","prescriptions_point","infos_surface"])
+    stable_risks=stable_current_risks(reports)
     cats={
-        "Inondation / nappe":classify_inondation(report),
-        "Argiles / sols":classify_argile(report),
-        "Mouvements / cavités":classify_mouvements(report),
-        "Séisme":classify_seisme(report),
-        "Radon":classify_radon(report),
-        "Risques technologiques":classify_tech(report),
+        "Inondation / nappe":stable_risks["Inondation / nappe"],
+        "Argiles / sols":stable_risks["Argiles / sols"],
+        "Mouvements / cavités":stable_risks["Mouvements / cavités"],
+        "Séisme":stable_risks["Séisme"],
+        "Radon":stable_risks["Radon"],
+        "Risques technologiques":stable_risks["Risques technologiques"],
         "Urbanisme":item("🟠" if zones else "⚪","Zonage détecté : "+", ".join(zones[:3]) if zones else "Zonage non récupéré",source="GPU / IGN",scope="parcelles",confidence="élevée" if zones else "faible",official_level=", ".join(zones[:3]) if zones else None,details=[f"{n_presc} prescription(s)/information(s) GPU intersectante(s)"]),
         "Climat 2050":item("🟠" if climate_profile.get("available") else "⚪","Adaptation à anticiper" if climate_profile.get("available") else "Données locales à compléter",source="Météo-France / TRACC",scope="région / département",confidence="élevée" if climate_profile.get("available") else "moyenne"),
         "Végétation / vulnérabilité feu":item("⚪","Photos requises",source="Photos utilisateur",scope="propriété",confidence="aucune")
@@ -681,7 +771,7 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.5</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.5.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -691,6 +781,11 @@ if go:
         st.subheader("Localisation");st.map(pd.DataFrame([{"lat":geo["lat"],"lon":geo["lon"]}]),zoom=17,size=12)
     with c2:
         st.subheader("Propriété identifiée");st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
+
+    st.caption(
+        "Stabilité V0.5.1 : chaque risque Géorisques est lu jusqu’à 3 fois. "
+        "PRM n’affiche un niveau que si une majorité des lectures concorde ; sinon le feu reste gris."
+    )
 
     st.subheader("Feux PRM — avec preuves")
     cols=st.columns(2)
@@ -782,7 +877,7 @@ if go:
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.5",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v05.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.5.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v051.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
