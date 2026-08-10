@@ -779,20 +779,23 @@ def premium_summary(cats, current_red, current_orange, current_gray,
             continue
         if x.get("status")=="🟢":
             level=x.get("official_level")
-            strengths.append(f"{name} : {x.get('label')}" + (f" ({level})" if level else ""))
+            strengths.append(
+                f"{name} : {x.get('label')}" + (f" ({level})" if level else "")
+            )
 
-    # Vigilances actuelles.
+    # A SURVEILLER = constats, incertitudes, contexte.
     for name in current_red+current_orange:
         x=cats[name]
         watch.append(f"{name} : {x.get('label')}")
 
-    # Incertitudes importantes.
     for name in current_gray:
         x=cats[name]
         watch.append(f"{name} : {x.get('label')}")
 
     if resolver_conf!="élevée":
-        watch.append(f"Identification parcellaire : confiance {resolver_conf} ({resolver_source}).")
+        watch.append(
+            f"Identification parcellaire : confiance {resolver_conf} ({resolver_source})."
+        )
 
     if priority_projects:
         nearest=min(priority_projects,key=lambda p:p["distance_m"])
@@ -802,14 +805,61 @@ def premium_summary(cats, current_red, current_orange, current_gray,
         )
 
     if climate_profile.get("available"):
-        watch.append("Horizon 2050 : adaptation à anticiper pour chaleur, eau, pluies intenses et végétation.")
+        watch.append(
+            "Horizon 2050 : adaptation à anticiper pour chaleur, eau, pluies intenses et végétation."
+        )
 
-    # Actions = lignes de vérification + actions immobilières concrètes.
-    actions.extend(verify_lines[:5])
+    # PRIORITES = actions concrètes uniquement.
+    # 1) Mouvements/cavités
+    if "Mouvements / cavités" in current_gray:
+        actions.append(
+            "Vérifier l’état des risques et mouvements de terrain sur les documents Géorisques / mairie "
+            "si ce point est déterminant pour l’achat."
+        )
+
+    # 2) Risques technologiques
+    if "Risques technologiques" in current_gray:
+        actions.append(
+            "Confirmer auprès des sources officielles la présence et la distance des canalisations "
+            "ou installations technologiques avant engagement."
+        )
+
+    # 3) Végétation
+    veg=cats.get("Végétation / vulnérabilité feu",{})
+    if veg.get("status")=="⚪":
+        actions.append(
+            "Ajouter des photos du jardin, des façades et de la toiture pour compléter l’inspection végétation / feu."
+        )
+    elif veg.get("status") in ["🟠","🔴"]:
+        actions.append(
+            "Traiter les facteurs de vulnérabilité végétation / feu identifiés avant ou après acquisition."
+        )
+
+    # 4) Parcelles
+    if resolver_conf!="élevée":
+        actions.append(
+            "Confirmer les parcelles retenues avec le plan cadastral ou un document opposable avant signature."
+        )
+
+    # 5) Projets voisins
     if priority_projects:
-        actions.append("Consulter les dossiers d’urbanisme des projets les plus proches avant décision définitive.")
+        actions.append(
+            "Consulter les dossiers d’urbanisme des projets les plus proches avant décision définitive."
+        )
+
+    # 6) Climat / visite
     if climate_profile.get("available"):
-        actions.append("Lors de la visite, vérifier protections solaires, ventilation nocturne, gestion des eaux et état de la végétation.")
+        actions.append(
+            "Lors de la visite, vérifier protections solaires, ventilation nocturne, gestion des eaux "
+            "et état de la végétation."
+        )
+
+    # 7) Risque actuel orange/rouge
+    if current_red or current_orange:
+        actions.insert(
+            0,
+            "Faire confirmer les alertes actuelles orange/rouge par les documents officiels ou un professionnel compétent."
+        )
 
     # Dédoublonnage.
     def dedupe(values):
@@ -829,7 +879,7 @@ def premium_summary(cats, current_red, current_orange, current_gray,
     if not watch:
         watch=["Aucun point de vigilance majeur identifié dans les données interprétées."]
     if not actions:
-        actions=["Aucune vérification prioritaire supplémentaire générée par PRM."]
+        actions=["Aucune action prioritaire supplémentaire générée par PRM."]
 
     return {
         "strengths":strengths,
@@ -915,7 +965,7 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
     for head,key in [
         ("POINTS RASSURANTS","strengths"),
         ("A SURVEILLER","watch"),
-        ("PRIORITES AVANT DECISION","actions"),
+        ("ACTIONS AVANT DECISION","actions"),
     ]:
         content=[Paragraph(head,h2)]
         for line in premium[key]:
@@ -1000,7 +1050,7 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
         canvas.saveState()
         canvas.setFont("Helvetica",7)
         canvas.setFillColor(colors.HexColor("#9CA3AF"))
-        canvas.drawString(16*mm,8*mm,"PRM V0.9 - Rapport décisionnel")
+        canvas.drawString(16*mm,8*mm,"PRM V0.9.1 - Rapport décisionnel")
         canvas.drawRightString(A4[0]-16*mm,8*mm,f"Page {doc.page}")
         canvas.restoreState()
 
@@ -1453,9 +1503,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.9</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.9.1</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.9 ajoute une restitution premium et un rapport PDF décisionnel téléchargeable.")
+st.write("V0.9.1 sépare strictement les constats à surveiller des actions concrètes avant décision.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1649,7 +1699,7 @@ if analysis_active:
         verify_lines.append("Aucun point majeur non résolu dans les données actuellement interprétées.")
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.9</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.9.1</div>
     <div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
@@ -1706,7 +1756,7 @@ if analysis_active:
         for line in premium["watch"]:
             st.write("• "+line)
     with p3:
-        st.markdown("### Priorités avant décision")
+        st.markdown("### Actions avant décision")
         for line in premium["actions"]:
             st.write("• "+line)
 
@@ -1880,17 +1930,17 @@ if analysis_active:
     d1,d2=st.columns(2)
     with d1:
         st.download_button(
-            "Télécharger le rapport PDF V0.9",
+            "Télécharger le rapport PDF V0.9.1",
             data=report_pdf,
-            file_name="rapport_prm_v09.pdf",
+            file_name="rapport_prm_v091.pdf",
             mime="application/pdf",
             use_container_width=True
         )
     with d2:
         st.download_button(
-            "Télécharger le snapshot JSON V0.9",
+            "Télécharger le snapshot JSON V0.9.1",
             data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),
-            file_name="prm_snapshot_v09.json",
+            file_name="prm_snapshot_v091.json",
             mime="application/json",
             use_container_width=True
         )
