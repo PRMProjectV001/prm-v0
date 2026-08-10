@@ -26,7 +26,7 @@ SITADEL_DATASETS = {
 
 def api_get(url,params=None):
     try:
-        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.4.1"})
+        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.4.2"})
         r.raise_for_status()
         return r.json(),None
     except Exception as e:
@@ -330,22 +330,42 @@ def clean_piece(v):
     return s
 
 def project_address(rec):
-    # Prefer explicit street fields. Avoid postal code alone being mistaken for an address.
+    """
+    Reconstruit une adresse lisible et écarte les identifiants techniques
+    que certains jeux Sitadel font remonter dans des champs voisins.
+    """
+    def valid_address_piece(v):
+        s=clean_piece(v)
+        if not s:return None
+        # Reject technical identifiers such as 200054781, parcel/internal IDs, etc.
+        if re.fullmatch(r"\d{6,}",s):return None
+        if re.fullmatch(r"[0-9A-Z]{8,}",s.upper()) and not re.search(r"[ÉÈÀA-Z]{3,}\s",s.upper()):
+            return None
+        # Generic intercommunal labels are not street localities.
+        if s.lower() in ["le grand paris","métropole du grand paris","metropole du grand paris"]:
+            return None
+        return s
+
     direct_keys=["adresse_terrain","adresse","adr_terrain","adresse_travaux","adresse_projet"]
     for key in direct_keys:
-        v=clean_piece(value_by_keys(rec,[key]))
-        if v and not re.fullmatch(r"\d{5}",v):return v
+        v=valid_address_piece(value_by_keys(rec,[key]))
+        if v and not re.fullmatch(r"\d{5}",v):
+            return v
 
-    num=clean_piece(value_contains(rec,["num_voie","numero_voie","numvoie","num_terrain"]))
-    typ=clean_piece(value_contains(rec,["type_voie","nature_voie"]))
-    voie=clean_piece(value_contains(rec,["nom_voie","libelle_voie","voie_terrain","voie"]))
-    commune=clean_piece(value_contains(rec,["nom_commune","commune"]))
-    cp=clean_piece(value_contains(rec,["code_postal","cp_terrain"]))
+    num=valid_address_piece(value_contains(rec,["num_voie","numero_voie","numvoie","num_terrain"]))
+    typ=valid_address_piece(value_contains(rec,["type_voie","nature_voie"]))
+    voie=valid_address_piece(value_contains(rec,["nom_voie","libelle_voie","voie_terrain","voie"]))
+    commune=valid_address_piece(value_contains(rec,["nom_commune","commune"]))
+    cp=valid_address_piece(value_contains(rec,["code_postal","cp_terrain"]))
 
-    parts=[x for x in [num,typ,voie] if x]
+    # Postal code is accepted only as postal code.
+    if cp and not re.fullmatch(r"\d{5}",cp):
+        cp=None
+
+    street=[x for x in [num,typ,voie] if x]
     locality=" ".join([x for x in [cp,commune] if x])
-    if parts:
-        return " ".join(parts)+(f", {locality}" if locality else "")
+    if street:
+        return " ".join(street)+(f", {locality}" if locality else "")
     return locality or None
 
 def project_reference(rec):
@@ -373,19 +393,45 @@ def project_kind(rec,category):
     return code_label(code,category)
 
 def project_description(rec,category):
+    """
+    Traduit seulement les codes dont la signification est suffisamment
+    documentée. Sinon PRM affiche un libellé générique plutôt que d'inventer.
+    """
     pieces=[]
-    fields=[
-        ("Nature",["nature_projet","nature_travaux","type_projet"]),
-        ("Logements",["nb_logements","nombre_logements","nb_lgt"]),
-        ("Surface créée",["surface_creee","surf_creee","surface_plancher_creee"]),
-        ("Destination",["destination","type_local","nature_local"]),
-    ]
-    for label,tokens in fields:
-        v=clean_piece(value_contains(rec,tokens))
-        if v:
-            if "surface" in label.lower() and re.fullmatch(r"\d+(?:[.,]\d+)?",v):v=f"{v} m²"
-            pieces.append(f"{label} : {v}")
-    return " · ".join(pieces[:4]) if pieces else project_kind(rec,category)
+
+    nature_raw=clean_piece(value_contains(rec,["nature_projet"]))
+    nature_map={
+        "1":"Nouvelle construction",
+        "2":"Travaux sur construction existante",
+    }
+    if nature_raw:
+        pieces.append("Nature : "+nature_map.get(nature_raw, f"Code Sitadel {nature_raw}"))
+
+    # The dataset itself already tells us the broad destination reliably.
+    if "Logements" in category:
+        pieces.append("Destination : habitation / logement")
+    elif "Locaux" in category:
+        pieces.append("Destination : local non résidentiel")
+
+    nb=clean_piece(value_contains(rec,["nb_logements","nombre_logements","nb_lgt"]))
+    if nb and nb not in ["0","0.0"]:
+        pieces.append(f"Logements créés : {nb}")
+
+    surf=clean_piece(value_contains(rec,["surface_creee","surf_creee","surface_plancher_creee"]))
+    if surf and surf not in ["0","0.0"]:
+        if re.fullmatch(r"\d+(?:[.,]\d+)?",surf):
+            surf=f"{surf} m²"
+        pieces.append(f"Surface créée : {surf}")
+
+    # Explicit textual destinations are useful; raw numeric codes are not shown.
+    dest=clean_piece(value_contains(rec,["libelle_destination","destination_libelle","nom_destination"]))
+    if dest and not re.fullmatch(r"\d+",dest):
+        pieces.append(f"Destination détaillée : {dest}")
+
+    if not pieces:
+        return project_kind(rec,category)
+
+    return " · ".join(pieces[:4])
 
 def query_sitadel_dataset(dataset_id,citycode,city):
     url=f"{DATAFAIR_BASE}/{dataset_id}/lines"
@@ -450,9 +496,9 @@ def card(name,x):
     <div style="font-size:1.05rem;font-weight:750">{x['status']} {name}</div><div style="color:#374151;margin-top:5px">{x['label']}</div>{details}
     <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Source : {x['source']}{lvl}<br>Portée : {x['scope']} · Confiance : {x['confidence']}<br>Vérifié : {x['checked_at']}</div></div>""",unsafe_allow_html=True)
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.4.1</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.4.2</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.4.1 transforme les permis bruts en projets prioritaires et rend la carte lisible.")
+st.write("V0.4.2 nettoie et traduit les fiches Sitadel pour les rendre compréhensibles.")
 
 with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
@@ -490,7 +536,7 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.4.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.4.2</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -555,5 +601,5 @@ if go:
 
     snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.4.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v041.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.4.2",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v042.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
