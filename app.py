@@ -4,6 +4,13 @@ import pandas as pd
 import requests
 from pypdf import PdfReader
 from io import BytesIO
+from reportlab.lib.pagesizes import A4
+from reportlab.lib import colors
+from reportlab.lib.enums import TA_LEFT, TA_CENTER
+from reportlab.lib.styles import getSampleStyleSheet, ParagraphStyle
+from reportlab.lib.units import mm
+from reportlab.platypus import SimpleDocTemplate, Paragraph, Spacer, Table, TableStyle, PageBreak
+
 import streamlit as st
 from shapely.geometry import Point, shape, mapping
 from shapely.ops import unary_union
@@ -749,6 +756,258 @@ def stable_current_risks(reports):
     }
 
 
+
+# ---------------- Restitution premium / PDF ----------------
+def plain_status(status):
+    return {
+        "🟢":"Faible / favorable",
+        "🟠":"Vigilance",
+        "🔴":"Vigilance forte",
+        "⚪":"A compléter",
+    }.get(status,"A compléter")
+
+def premium_summary(cats, current_red, current_orange, current_gray,
+                    resolver_source, resolver_conf, priority_projects,
+                    climate_profile, verify_lines):
+    strengths=[]
+    watch=[]
+    actions=[]
+
+    # Points rassurants = uniquement éléments interprétés verts.
+    for name,x in cats.items():
+        if name in ["Urbanisme","Climat 2050"]:
+            continue
+        if x.get("status")=="🟢":
+            level=x.get("official_level")
+            strengths.append(f"{name} : {x.get('label')}" + (f" ({level})" if level else ""))
+
+    # Vigilances actuelles.
+    for name in current_red+current_orange:
+        x=cats[name]
+        watch.append(f"{name} : {x.get('label')}")
+
+    # Incertitudes importantes.
+    for name in current_gray:
+        x=cats[name]
+        watch.append(f"{name} : {x.get('label')}")
+
+    if resolver_conf!="élevée":
+        watch.append(f"Identification parcellaire : confiance {resolver_conf} ({resolver_source}).")
+
+    if priority_projects:
+        nearest=min(priority_projects,key=lambda p:p["distance_m"])
+        watch.append(
+            f"Projets voisins : {len(priority_projects)} autorisation(s) prioritaire(s), "
+            f"la plus proche à {nearest['distance_m']} m."
+        )
+
+    if climate_profile.get("available"):
+        watch.append("Horizon 2050 : adaptation à anticiper pour chaleur, eau, pluies intenses et végétation.")
+
+    # Actions = lignes de vérification + actions immobilières concrètes.
+    actions.extend(verify_lines[:5])
+    if priority_projects:
+        actions.append("Consulter les dossiers d’urbanisme des projets les plus proches avant décision définitive.")
+    if climate_profile.get("available"):
+        actions.append("Lors de la visite, vérifier protections solaires, ventilation nocturne, gestion des eaux et état de la végétation.")
+
+    # Dédoublonnage.
+    def dedupe(values):
+        out=[];seen=set()
+        for v in values:
+            key=v.strip().lower()
+            if key and key not in seen:
+                seen.add(key);out.append(v)
+        return out
+
+    strengths=dedupe(strengths)[:6]
+    watch=dedupe(watch)[:7]
+    actions=dedupe(actions)[:7]
+
+    if not strengths:
+        strengths=["Aucun point rassurant suffisamment documenté pour être mis en avant."]
+    if not watch:
+        watch=["Aucun point de vigilance majeur identifié dans les données interprétées."]
+    if not actions:
+        actions=["Aucune vérification prioritaire supplémentaire générée par PRM."]
+
+    return {
+        "strengths":strengths,
+        "watch":watch,
+        "actions":actions,
+    }
+
+def pdf_safe(s):
+    # ReportLab standard fonts handle Latin-1 well; normalize unsupported glyphs.
+    return (str(s or "")
+            .replace("•","-")
+            .replace("→","-")
+            .replace("≈","env.")
+            .replace("≤","<=")
+            .replace("≥",">=")
+            .replace("’","'")
+            .replace("“",'"')
+            .replace("”",'"')
+            .replace("–","-")
+            .replace("—","-"))
+
+def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
+                  context_lines, future_lines, verify_lines,
+                  premium, priority_projects, climate_profile,
+                  resolver_source, resolver_conf):
+    buf=BytesIO()
+    doc=SimpleDocTemplate(
+        buf,pagesize=A4,
+        rightMargin=16*mm,leftMargin=16*mm,
+        topMargin=16*mm,bottomMargin=16*mm,
+        title="Rapport PRM",
+        author="Property Risk Management"
+    )
+
+    styles=getSampleStyleSheet()
+    title=ParagraphStyle(
+        "PRMTitle",parent=styles["Title"],fontName="Helvetica-Bold",
+        fontSize=22,leading=26,textColor=colors.HexColor("#111827"),
+        spaceAfter=7
+    )
+    h1=ParagraphStyle(
+        "PRMH1",parent=styles["Heading1"],fontName="Helvetica-Bold",
+        fontSize=14,leading=18,textColor=colors.HexColor("#111827"),
+        spaceBefore=8,spaceAfter=6
+    )
+    h2=ParagraphStyle(
+        "PRMH2",parent=styles["Heading2"],fontName="Helvetica-Bold",
+        fontSize=11.5,leading=14,textColor=colors.HexColor("#374151"),
+        spaceBefore=5,spaceAfter=4
+    )
+    body=ParagraphStyle(
+        "PRMBody",parent=styles["BodyText"],fontName="Helvetica",
+        fontSize=9.2,leading=13,textColor=colors.HexColor("#374151"),
+        spaceAfter=4
+    )
+    small=ParagraphStyle(
+        "PRMSmall",parent=body,fontSize=7.8,leading=10,
+        textColor=colors.HexColor("#6B7280")
+    )
+    verdict=ParagraphStyle(
+        "PRMVerdict",parent=styles["Heading1"],fontName="Helvetica-Bold",
+        fontSize=16,leading=20,textColor=colors.HexColor(
+            "#B91C1C" if gs=="🔴" else "#C2410C" if gs=="🟠" else "#15803D"
+        ),spaceBefore=6,spaceAfter=4
+    )
+
+    story=[]
+    story.append(Paragraph("PROPERTY RISK MANAGEMENT", small))
+    story.append(Paragraph("Rapport décisionnel PRM", title))
+    story.append(Paragraph(pdf_safe(geo.get("label")), h1))
+    parcel_txt=", ".join(r.get("Parcelle","") for r in rows)
+    story.append(Paragraph(
+        pdf_safe(f"Parcelle(s) : {parcel_txt} | Resolver : {resolver_source} | Confiance : {resolver_conf}"),
+        small
+    ))
+    story.append(Spacer(1,5*mm))
+    story.append(Paragraph(pdf_safe(gl), verdict))
+    story.append(Paragraph(pdf_safe(headline_reason), body))
+    story.append(Spacer(1,3*mm))
+
+    # Executive summary boxes.
+    cells=[]
+    for head,key in [
+        ("POINTS RASSURANTS","strengths"),
+        ("A SURVEILLER","watch"),
+        ("PRIORITES AVANT DECISION","actions"),
+    ]:
+        content=[Paragraph(head,h2)]
+        for line in premium[key]:
+            content.append(Paragraph(pdf_safe("- "+line), body))
+        cells.append(content)
+
+    t=Table([cells],colWidths=[58*mm,58*mm,58*mm],hAlign="LEFT")
+    t.setStyle(TableStyle([
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("BOX",(0,0),(-1,-1),0.6,colors.HexColor("#D1D5DB")),
+        ("INNERGRID",(0,0),(-1,-1),0.4,colors.HexColor("#E5E7EB")),
+        ("BACKGROUND",(0,0),(0,0),colors.HexColor("#F0FDF4")),
+        ("BACKGROUND",(1,0),(1,0),colors.HexColor("#FFF7ED")),
+        ("BACKGROUND",(2,0),(2,0),colors.HexColor("#F9FAFB")),
+        ("LEFTPADDING",(0,0),(-1,-1),7),
+        ("RIGHTPADDING",(0,0),(-1,-1),7),
+        ("TOPPADDING",(0,0),(-1,-1),7),
+        ("BOTTOMPADDING",(0,0),(-1,-1),7),
+    ]))
+    story.append(t)
+    story.append(Spacer(1,5*mm))
+
+    story.append(Paragraph("Risques actuels - détail", h1))
+    risk_rows=[["Thématique","Lecture PRM","Niveau / confiance"]]
+    for name,x in cats.items():
+        if name in ["Urbanisme","Climat 2050"]:
+            continue
+        level=x.get("official_level") or plain_status(x.get("status"))
+        conf=x.get("confidence") or "non précisée"
+        risk_rows.append([
+            Paragraph(pdf_safe(name),body),
+            Paragraph(pdf_safe(x.get("label")),body),
+            Paragraph(pdf_safe(f"{level} | {conf}"),body)
+        ])
+    rt=Table(risk_rows,colWidths=[46*mm,86*mm,42*mm],repeatRows=1)
+    rt.setStyle(TableStyle([
+        ("BACKGROUND",(0,0),(-1,0),colors.HexColor("#111827")),
+        ("TEXTCOLOR",(0,0),(-1,0),colors.white),
+        ("FONTNAME",(0,0),(-1,0),"Helvetica-Bold"),
+        ("GRID",(0,0),(-1,-1),0.35,colors.HexColor("#D1D5DB")),
+        ("VALIGN",(0,0),(-1,-1),"TOP"),
+        ("LEFTPADDING",(0,0),(-1,-1),5),
+        ("RIGHTPADDING",(0,0),(-1,-1),5),
+        ("TOPPADDING",(0,0),(-1,-1),5),
+        ("BOTTOMPADDING",(0,0),(-1,-1),5),
+    ]))
+    story.append(rt)
+
+    story.append(Paragraph("Contraintes et contexte", h1))
+    for line in context_lines:
+        story.append(Paragraph(pdf_safe("- "+line),body))
+
+    story.append(Paragraph("Adaptation future", h1))
+    for line in future_lines:
+        story.append(Paragraph(pdf_safe("- "+line),body))
+
+    if priority_projects:
+        story.append(Paragraph("Projets voisins prioritaires", h1))
+        for p in priority_projects[:5]:
+            line=(
+                f"{p.get('kind')} - {p.get('distance_m')} m - "
+                f"{p.get('date') or 'date non interprétée'} - "
+                f"{p.get('address') or 'adresse non extraite'}"
+            )
+            story.append(Paragraph(pdf_safe("- "+line),body))
+
+    story.append(Paragraph("Points à vérifier avant décision", h1))
+    for line in verify_lines[:7]:
+        story.append(Paragraph(pdf_safe("- "+line),body))
+
+    story.append(Spacer(1,5*mm))
+    story.append(Paragraph(
+        "Important : ce rapport est un outil d'aide à la décision construit à partir de données publiques, "
+        "de traitements automatiques et, le cas échéant, de déclarations visuelles de l'utilisateur. "
+        "Il ne constitue ni un diagnostic réglementaire, ni une garantie sur le bien. "
+        "Les éléments importants doivent être confirmés auprès des administrations, professionnels compétents "
+        "et documents opposables avant engagement.",
+        small
+    ))
+
+    def footer(canvas,doc):
+        canvas.saveState()
+        canvas.setFont("Helvetica",7)
+        canvas.setFillColor(colors.HexColor("#9CA3AF"))
+        canvas.drawString(16*mm,8*mm,"PRM V0.9 - Rapport décisionnel")
+        canvas.drawRightString(A4[0]-16*mm,8*mm,f"Page {doc.page}")
+        canvas.restoreState()
+
+    doc.build(story,onFirstPage=footer,onLaterPages=footer)
+    return buf.getvalue()
+
+
 # ---------------- Climat 2050 ----------------
 IDF_DEPTS = {"75","77","78","91","92","93","94","95"}
 
@@ -1194,9 +1453,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.8.1</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.9</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.8.1 affine le wording du bandeau global et déduplique les points à vérifier.")
+st.write("V0.9 ajoute une restitution premium et un rapport PDF décisionnel téléchargeable.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -1390,7 +1649,7 @@ if analysis_active:
         verify_lines.append("Aucun point majeur non résolu dans les données actuellement interprétées.")
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.8.1</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.9</div>
     <div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
@@ -1428,6 +1687,31 @@ if analysis_active:
     st.caption(
         "Lecture PRM : le bandeau global est désormais piloté par les risques actuels. "
         "Urbanisme, projets voisins et climat 2050 sont présentés séparément afin de ne pas les confondre avec une exposition actuelle."
+    )
+
+    premium=premium_summary(
+        cats,current_red,current_orange,current_gray,
+        resolver_source,resolver_conf,priority_projects,
+        climate_profile,verify_lines
+    )
+
+    st.subheader("📋 Lecture premium PRM")
+    p1,p2,p3=st.columns(3)
+    with p1:
+        st.markdown("### Points rassurants")
+        for line in premium["strengths"]:
+            st.write("• "+line)
+    with p2:
+        st.markdown("### À surveiller")
+        for line in premium["watch"]:
+            st.write("• "+line)
+    with p3:
+        st.markdown("### Priorités avant décision")
+        for line in premium["actions"]:
+            st.write("• "+line)
+
+    st.caption(
+        "Cette lecture hiérarchise le dossier ; elle ne transforme pas les données PRM en certification du bien."
     )
 
     c1,c2=st.columns(2)
@@ -1582,8 +1866,34 @@ if analysis_active:
                   "current_gray":current_gray,
                   "context":context_lines,
                   "future":future_lines,
-                  "to_verify":verify_lines
+                  "to_verify":verify_lines,
+                  "premium":premium
               },"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
+
+    st.subheader("📄 Rapport PRM")
+    report_pdf=build_prm_pdf(
+        geo,rows,gs,gl,headline_reason,cats,
+        context_lines,future_lines,verify_lines,
+        premium,priority_projects,climate_profile,
+        resolver_source,resolver_conf
+    )
+    d1,d2=st.columns(2)
+    with d1:
+        st.download_button(
+            "Télécharger le rapport PDF V0.9",
+            data=report_pdf,
+            file_name="rapport_prm_v09.pdf",
+            mime="application/pdf",
+            use_container_width=True
+        )
+    with d2:
+        st.download_button(
+            "Télécharger le snapshot JSON V0.9",
+            data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),
+            file_name="prm_snapshot_v09.json",
+            mime="application/json",
+            use_container_width=True
+        )
+
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.8.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v081.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
