@@ -788,9 +788,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.6</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.7.1</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.6 ajoute une inspection visuelle documentée de la végétation et de la vulnérabilité feu.")
+st.write("V0.7.1 intègre le résultat de l’inspection végétation dans le résumé PRM et stabilise l’interactivité Streamlit.")
 
 
 st.subheader("📷 Photos du bien — optionnel")
@@ -817,20 +817,60 @@ with st.form("search"):
     go=st.form_submit_button("Analyser cette propriété",use_container_width=True)
 
 if go:
+    st.session_state["prm_analysis_active"] = True
+    st.session_state["prm_analysis_address"] = address
+    st.session_state["prm_analysis_radius"] = radius
+
+analysis_active = st.session_state.get("prm_analysis_active", False)
+
+if analysis_active:
+    run_address = st.session_state.get("prm_analysis_address", address)
+    run_radius = st.session_state.get("prm_analysis_radius", radius)
+
     with st.spinner("Identification, risques, urbanisme et projets voisins…"):
-        geo,gerr=geocode(address)
+        geo,gerr=geocode(run_address)
         if not geo:st.error(gerr);st.stop()
-        selected,reasons,resolver_conf,resolver_source,resolver_errors,candidates=auto_resolve(address,geo["lon"],geo["lat"])
+        selected,reasons,resolver_conf,resolver_source,resolver_errors,candidates=auto_resolve(run_address,geo["lon"],geo["lat"])
         if not selected:st.error("PRM n’a pas pu identifier de parcelle probable.");st.stop()
         geom=union_geom(selected)
         urbanism,uerrors=get_urbanism(geom)
         reports,rerrs=get_reports_stable(geo["lon"],geo["lat"])
-        projects,project_errors=get_projects(geo["lat"],geo["lon"],geo.get("citycode"),geo.get("city"),radius)
+        projects,project_errors=get_projects(geo["lat"],geo["lon"],geo.get("citycode"),geo.get("city"),run_radius)
         climate_profile=climate_2050_profile(geo)
 
     rows=[row(f,candidates) for f in selected];zones=zone_labels(urbanism.get("zones",[]))
     n_presc=sum(len(urbanism.get(k,[])) for k in ["prescriptions_surface","prescriptions_line","prescriptions_point","infos_surface"])
     stable_risks=stable_current_risks(reports)
+
+    # V0.7.1 — read persisted checkbox state before building the main PRM cards.
+    # This allows the vegetation result to update immediately after any checkbox interaction.
+    selected_veg_state = [
+        key for key, label, weight, advice in VEG_ITEMS
+        if st.session_state.get(f"veg_{key}", False)
+    ]
+    veg_assessment = vegetation_assessment(
+        selected_veg_state,
+        len(veg_photos or [])
+    )
+
+    veg_details = []
+    if veg_assessment.get("score") is not None:
+        veg_details.append(
+            f"Score visuel interne : {veg_assessment['score']} · "
+            f"{len(veg_photos or [])} photo(s)"
+        )
+    if veg_assessment.get("findings"):
+        veg_details.extend([f["label"] for f in veg_assessment["findings"][:3]])
+
+    vegetation_card = item(
+        veg_assessment["status"],
+        veg_assessment["label"],
+        source="Photos utilisateur",
+        scope="propriété",
+        confidence=veg_assessment["confidence"],
+        details=veg_details
+    )
+
     cats={
         "Inondation / nappe":stable_risks["Inondation / nappe"],
         "Argiles / sols":stable_risks["Argiles / sols"],
@@ -840,7 +880,7 @@ if go:
         "Risques technologiques":stable_risks["Risques technologiques"],
         "Urbanisme":item("🟠" if zones else "⚪","Zonage détecté : "+", ".join(zones[:3]) if zones else "Zonage non récupéré",source="GPU / IGN",scope="parcelles",confidence="élevée" if zones else "faible",official_level=", ".join(zones[:3]) if zones else None,details=[f"{n_presc} prescription(s)/information(s) GPU intersectante(s)"]),
         "Climat 2050":item("🟠" if climate_profile.get("available") else "⚪","Adaptation à anticiper" if climate_profile.get("available") else "Données locales à compléter",source="Météo-France / TRACC",scope="région / département",confidence="élevée" if climate_profile.get("available") else "moyenne"),
-        "Végétation / vulnérabilité feu":item("⚪","Inspection visuelle disponible plus bas",source="Photos utilisateur",scope="propriété",confidence="aucune")
+        "Végétation / vulnérabilité feu":vegetation_card
     }
     reds=sum(x["status"]=="🔴" for x in cats.values());oranges=sum(x["status"]=="🟠" for x in cats.values())
     if reds:gs,gl="🔴","VIGILANCE FORTE"
@@ -849,7 +889,7 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.6</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.7.1</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -861,7 +901,7 @@ if go:
         st.subheader("Propriété identifiée");st.dataframe(pd.DataFrame(rows),hide_index=True,use_container_width=True)
 
     st.caption(
-        "Stabilité V0.5.1 : chaque risque Géorisques est lu jusqu’à 3 fois. "
+        "Moteur de stabilité Géorisques : chaque risque est lu jusqu’à 3 fois. "
         "PRM n’affiche un niveau que si une majorité des lectures concorde ; sinon le feu reste gris."
     )
 
@@ -886,6 +926,9 @@ if go:
     else:
         st.info("Ajoutez des photos en haut de la page pour activer l’inspection visuelle.")
 
+    # The assessment displayed here is recomputed from the current widget values.
+    # On checkbox interaction Streamlit reruns, and the main PRM card above then
+    # receives this same persisted state.
     veg_assessment=vegetation_assessment(selected_veg,len(veg_photos or []))
 
     st.markdown(f"### {veg_assessment['status']} {veg_assessment['label']}")
@@ -908,9 +951,11 @@ if go:
         "des matériaux du bâtiment, de l’entretien et des obligations locales de débroussaillement."
     )
 
+    st.caption("V0.7.1 : ce résultat est également repris dans la carte principale « Végétation / vulnérabilité feu ».")
+
 
     st.subheader("🏗 Projets & autorisations autour du bien")
-    st.caption(f"Sitadel dans un rayon de {radius} m. Les autorisations sont diffusées mensuellement et peuvent comporter un délai de remontée.")
+    st.caption(f"Sitadel dans un rayon de {run_radius} m. Les autorisations sont diffusées mensuellement et peuvent comporter un délai de remontée.")
 
     priority_projects=[p for p in projects if p["priority"]<=1]
     if not projects:
@@ -994,7 +1039,7 @@ if go:
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"risk_engine":{"georisques_reads":len(reports),"errors":rerrs},"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.6",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v06.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.7.1",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v071.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
