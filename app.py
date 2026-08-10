@@ -26,7 +26,7 @@ SITADEL_DATASETS = {
 
 def api_get(url,params=None):
     try:
-        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.4.2"})
+        r=requests.get(url,params=params,timeout=TIMEOUT,headers={"User-Agent":"PRM-V0.5"})
         r.raise_for_status()
         return r.json(),None
     except Exception as e:
@@ -252,6 +252,150 @@ def classify_tech(report):
         if subtree_text(subtrees(report,aliases)):detected.append(label)
     if not detected:return item("🟢","Aucun signal technologique majeur extrait")
     return item("⚪","Objet technologique mentionné, distance non interprétable",confidence="faible",details=[f"Type détecté : {x}" for x in detected])
+
+
+# ---------------- Climat 2050 ----------------
+IDF_DEPTS = {"75","77","78","91","92","93","94","95"}
+
+IDF_SUMMER_WARMING = {
+    "75": 2.2, "77": 2.3, "78": 2.3, "91": 2.4,
+    "92": 2.3, "93": 2.2, "94": 2.3, "95": 2.2
+}
+IDF_WINTER_WARMING = {
+    "75": 1.6, "77": 1.8, "78": 1.7, "91": 1.7,
+    "92": 1.6, "93": 1.7, "94": 1.7, "95": 1.7
+}
+
+def dept_from_postcode(postcode):
+    s=str(postcode or "")
+    if len(s)>=2:
+        if s.startswith(("97","98")) and len(s)>=3:
+            return s[:3]
+        return s[:2]
+    return None
+
+def climate_2050_profile(geo):
+    """
+    Conservative climate module:
+    - national TRACC anchor for metropolitan France;
+    - detailed regional/departemental values only where an official
+      Météo-France 2050 regional publication is hard-coded and sourced.
+    """
+    dept=dept_from_postcode(geo.get("postcode"))
+    base={
+        "horizon":"2050",
+        "framework":"TRACC",
+        "national_warming":"+2,7 °C France hexagonale et Corse vs préindustriel",
+        "reference_period":"1976-2005 pour les comparaisons régionales Météo-France",
+        "source":"Météo-France / TRACC",
+        "scope":"région / département",
+        "confidence":"élevée",
+        "checked_at":now_fr(),
+        "available":False,
+        "region":None,
+        "metrics":[]
+    }
+
+    if dept in IDF_DEPTS:
+        base["available"]=True
+        base["region"]="Île-de-France"
+        summer=IDF_SUMMER_WARMING.get(dept)
+        winter=IDF_WINTER_WARMING.get(dept)
+        base["metrics"]=[
+            {
+                "name":"Température moyenne annuelle",
+                "status":"🟠",
+                "future":"+1,9 °C",
+                "baseline":"par rapport à 1976-2005",
+                "scope":"moyenne régionale",
+                "why":"Climat globalement plus chaud ; confort d’été et besoins de rafraîchissement à anticiper."
+            },
+            {
+                "name":"Température estivale",
+                "status":"🟠",
+                "future":f"+{summer:.1f} °C" if summer is not None else "+2,2 à +2,4 °C",
+                "baseline":"par rapport à 1976-2005",
+                "scope":f"département {dept}" if summer is not None else "Île-de-France",
+                "why":"Impact direct sur le confort d’été, les combles, les façades exposées et les besoins d’ombrage."
+            },
+            {
+                "name":"Température hivernale",
+                "status":"🟢",
+                "future":f"+{winter:.1f} °C" if winter is not None else "+1,6 à +1,8 °C",
+                "baseline":"par rapport à 1976-2005",
+                "scope":f"département {dept}" if winter is not None else "Île-de-France",
+                "why":"Hivers plus doux en moyenne ; baisse possible de certains besoins de chauffage."
+            },
+            {
+                "name":"Jours > 35 °C",
+                "status":"🟠",
+                "future":"≈ 4 jours/an",
+                "baseline":"< 1 jour/an dans le climat passé",
+                "scope":"moyenne régionale",
+                "why":"Les pics de chaleur deviennent un enjeu réel pour les logements peu protégés du soleil."
+            },
+            {
+                "name":"Nuits chaudes > 20 °C",
+                "status":"🟠",
+                "future":"≈ 10 nuits/an",
+                "baseline":"≈ 2 nuits/an dans le climat passé",
+                "scope":"moyenne régionale",
+                "why":"Rafraîchissement nocturne plus difficile ; attention aux chambres sous toiture et aux logements traversants ou non."
+            },
+            {
+                "name":"Sécheresse des sols",
+                "status":"🟠",
+                "future":"≈ 139 jours/an",
+                "baseline":"≈ 118 jours/an",
+                "scope":"moyenne régionale",
+                "why":"Stress accru pour jardins et végétation ; à croiser avec le risque argiles et la gestion de l’eau."
+            },
+            {
+                "name":"Pluies les plus intenses",
+                "status":"🟠",
+                "future":"≈ +10 %",
+                "baseline":"intensité des épisodes forts",
+                "scope":"moyenne régionale",
+                "why":"Peut accroître ruissellement, saturation des réseaux et vulnérabilité des sous-sols selon la topographie locale."
+            },
+            {
+                "name":"Jours à risque élevé de feu",
+                "status":"🟠",
+                "future":"≈ 7 jours/an",
+                "baseline":"≈ 1,6 jour/an",
+                "scope":"moyenne régionale",
+                "why":"La végétation autour du bien devient plus importante à surveiller ; exposition réelle à confirmer par photos et contexte local."
+            },
+        ]
+    else:
+        base["metrics"]=[
+            {
+                "name":"Trajectoire 2050",
+                "status":"⚪",
+                "future":"+2,7 °C France hexagonale et Corse",
+                "baseline":"par rapport à l’ère préindustrielle",
+                "scope":"national",
+                "why":"PRM n’a pas encore branché la projection régionale détaillée pour ce territoire."
+            }
+        ]
+    return base
+
+def climate_summary_status(profile):
+    if not profile.get("available"):
+        return "⚪","Données locales à compléter"
+    oranges=sum(m.get("status")=="🟠" for m in profile.get("metrics",[]))
+    return ("🟠","Adaptation à anticiper") if oranges else ("🟢","Évolution limitée")
+
+def climate_card(metric):
+    st.markdown(f"""
+    <div style="border:1px solid #e5e7eb;border-radius:14px;padding:15px 17px;margin:7px 0;background:#fff">
+      <div style="font-size:1.02rem;font-weight:750">{metric['status']} {metric['name']}</div>
+      <div style="font-size:1.15rem;font-weight:700;margin-top:5px">{metric['future']}</div>
+      <div style="color:#6b7280;margin-top:2px">{metric['baseline']}</div>
+      <div style="color:#374151;margin-top:8px">{metric['why']}</div>
+      <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Portée : {metric['scope']}</div>
+    </div>
+    """, unsafe_allow_html=True)
 
 # ---------------- Sitadel ----------------
 def haversine(lat1,lon1,lat2,lon2):
@@ -496,9 +640,9 @@ def card(name,x):
     <div style="font-size:1.05rem;font-weight:750">{x['status']} {name}</div><div style="color:#374151;margin-top:5px">{x['label']}</div>{details}
     <div style="font-size:.77rem;color:#9ca3af;margin-top:9px">Source : {x['source']}{lvl}<br>Portée : {x['scope']} · Confiance : {x['confidence']}<br>Vérifié : {x['checked_at']}</div></div>""",unsafe_allow_html=True)
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.4.2</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V0.5</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V0.4.2 nettoie et traduit les fiches Sitadel pour les rendre compréhensibles.")
+st.write("V0.5 ajoute un module Climat 2050 fondé sur la TRACC et les projections Météo-France.")
 
 with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
@@ -515,6 +659,7 @@ if go:
         urbanism,uerrors=get_urbanism(geom)
         report,rerr=get_report(geo["lon"],geo["lat"])
         projects,project_errors=get_projects(geo["lat"],geo["lon"],geo.get("citycode"),geo.get("city"),radius)
+        climate_profile=climate_2050_profile(geo)
 
     rows=[row(f,candidates) for f in selected];zones=zone_labels(urbanism.get("zones",[]))
     n_presc=sum(len(urbanism.get(k,[])) for k in ["prescriptions_surface","prescriptions_line","prescriptions_point","infos_surface"])
@@ -526,7 +671,7 @@ if go:
         "Radon":classify_radon(report),
         "Risques technologiques":classify_tech(report),
         "Urbanisme":item("🟠" if zones else "⚪","Zonage détecté : "+", ".join(zones[:3]) if zones else "Zonage non récupéré",source="GPU / IGN",scope="parcelles",confidence="élevée" if zones else "faible",official_level=", ".join(zones[:3]) if zones else None,details=[f"{n_presc} prescription(s)/information(s) GPU intersectante(s)"]),
-        "Climat 2050":item("⚪","Module officiel à connecter",source="À connecter",scope="commune",confidence="aucune"),
+        "Climat 2050":item("🟠" if climate_profile.get("available") else "⚪","Adaptation à anticiper" if climate_profile.get("available") else "Données locales à compléter",source="Météo-France / TRACC",scope="région / département",confidence="élevée" if climate_profile.get("available") else "moyenne"),
         "Végétation / vulnérabilité feu":item("⚪","Photos requises",source="Photos utilisateur",scope="propriété",confidence="aucune")
     }
     reds=sum(x["status"]=="🔴" for x in cats.values());oranges=sum(x["status"]=="🟠" for x in cats.values())
@@ -536,7 +681,7 @@ if go:
     else:gs,gl="⚪","DONNÉES À COMPLÉTER"
 
     st.markdown(f"""<div style="padding:24px;border-radius:20px;background:#111827;color:white;margin-bottom:18px">
-    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.4.2</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
+    <div style="font-size:.85rem;color:#9ca3af">PRM SNAPSHOT V0.5</div><div style="font-size:1.55rem;font-weight:800;margin-top:5px">{geo['label']}</div>
     <div style="font-size:1rem;color:#d1d5db;margin-top:4px">Parcelle(s) : {", ".join(x["Parcelle"] for x in rows)}</div>
     <div style="font-size:.9rem;color:#9ca3af;margin-top:3px">Resolver : {resolver_source} · Confiance : {resolver_conf}</div>
     <div style="font-size:2.1rem;font-weight:800;margin-top:14px">{gs} {gl}</div></div>""",unsafe_allow_html=True)
@@ -595,11 +740,49 @@ if go:
         st.markdown("### Carte des projets")
         st.map(pd.DataFrame(map_rows),latitude="lat",longitude="lon",size="size",color="color",zoom=15,height=450)
 
+
+    st.subheader("🌡️ Votre maison en 2050")
+    cstatus,clabel=climate_summary_status(climate_profile)
+    st.markdown(f"### {cstatus} {clabel}")
+    st.caption(
+        f"Horizon {climate_profile['horizon']} · Cadre {climate_profile['framework']} · "
+        f"Source : {climate_profile['source']} · Portée : {climate_profile['scope']}"
+    )
+    st.write(
+        "PRM présente ici l’évolution du climat du territoire, pas une prédiction météo de la parcelle. "
+        "La vulnérabilité réelle du bâtiment dépend ensuite de son orientation, de l’isolation, des protections solaires, "
+        "du sous-sol, de la végétation et de la topographie."
+    )
+
+    if climate_profile.get("region"):
+        st.write(f"**Territoire climatique utilisé :** {climate_profile['region']}")
+        st.write(f"**Référence :** {climate_profile['reference_period']}")
+    else:
+        st.info("La projection régionale détaillée n’est pas encore branchée pour ce territoire ; PRM conserve seulement la trajectoire nationale.")
+
+    ccols=st.columns(2)
+    for i,m in enumerate(climate_profile.get("metrics",[])):
+        with ccols[i%2]:
+            climate_card(m)
+
+    if climate_profile.get("available"):
+        st.markdown("#### Lecture immobilière PRM")
+        st.write(
+            "À l’horizon 2050, la priorité n’est pas seulement la température moyenne : pour un acheteur, "
+            "les points les plus concrets sont le **confort d’été**, la **capacité à rafraîchir la maison la nuit**, "
+            "la **gestion de l’eau et du jardin**, la **résilience aux pluies intenses** et la **végétation autour du bien**."
+        )
+        st.caption(
+            "Ces valeurs sont des moyennes régionales/départementales Météo-France. "
+            "Elles ne doivent pas être interprétées comme une mesure au numéro de rue."
+        )
+
+
     st.subheader("Urbanisme parcellaire")
     st.write("**Zonage GPU :**"," · ".join(zones[:8]) if zones else "Non récupéré")
     st.write("Aucune prescription/information GPU particulière détectée sur le périmètre analysé." if n_presc==0 else f"{n_presc} prescription(s) ou information(s) GPU intersectent le périmètre.")
 
-    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"urbanism":{"zones":zones,"prescription_count":n_presc}}
+    snapshot={"generated_at":datetime.now(timezone.utc).isoformat(),"address":geo,"property_resolver":{"source":resolver_source,"confidence":resolver_conf,"parcels":rows},"risks":cats,"projects":{"radius_m":radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"urbanism":{"zones":zones,"prescription_count":n_presc}}
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.download_button("Télécharger le snapshot JSON V0.4.2",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v042.json",mime="application/json",use_container_width=True)
+    st.download_button("Télécharger le snapshot JSON V0.5",data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),file_name="prm_snapshot_v05.json",mime="application/json",use_container_width=True)
     st.caption("Prototype d’aide à la décision. Vérifier les dossiers importants auprès du service urbanisme compétent.")
