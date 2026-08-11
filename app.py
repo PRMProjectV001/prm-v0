@@ -901,6 +901,26 @@ def pdf_safe(s):
             .replace("–","-")
             .replace("—","-"))
 
+LEGAL_NOTICE_SHORT = (
+    "Les résultats sont fournis à titre informatif, à partir de données publiques et de sources tierces "
+    "disponibles à la date de l’analyse. Ils ne remplacent ni les documents officiels opposables, "
+    "ni l’avis d’un professionnel compétent."
+)
+
+LEGAL_NOTICE_FULL = (
+    "Les informations présentées dans ce rapport sont fournies à titre informatif et d’aide à la décision. "
+    "Elles sont établies à partir de données publiques, de sources tierces accessibles à la date de l’analyse "
+    "et, le cas échéant, d’éléments déclarés ou fournis par l’utilisateur. Malgré le soin apporté à leur collecte, "
+    "leur traitement et leur restitution, ces informations peuvent être incomplètes, imprécises, obsolètes ou "
+    "comporter des erreurs provenant notamment des sources utilisées. Ce rapport ne constitue ni une expertise "
+    "technique, ni un diagnostic réglementaire, ni un audit juridique, notarial, urbanistique ou environnemental, "
+    "ni une certification ou une garantie quant à l’état, la conformité, la valeur ou l’absence de risque du bien analysé. "
+    "Les éléments déterminants doivent être vérifiés à partir des documents officiels opposables et, lorsque nécessaire, "
+    "auprès des professionnels ou administrations compétents. L’utilisateur demeure responsable de sa décision d’acquérir, "
+    "de vendre, de louer ou d’investir. La responsabilité de l’éditeur ne saurait être engagée du seul fait d’une information "
+    "absente, inexacte ou devenue obsolète provenant d’une source tierce, sous réserve des dispositions légales impératives applicables."
+)
+
 def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
                   context_lines, future_lines, verify_lines,
                   premium, priority_projects, climate_profile,
@@ -1042,20 +1062,14 @@ def build_prm_pdf(geo, rows, gs, gl, headline_reason, cats,
         story.append(Paragraph(pdf_safe("- "+line),body))
 
     story.append(Spacer(1,5*mm))
-    story.append(Paragraph(
-        "Important : ce rapport est un outil d'aide à la décision construit à partir de données publiques, "
-        "de traitements automatiques et, le cas échéant, de déclarations visuelles de l'utilisateur. "
-        "Il ne constitue ni un diagnostic réglementaire, ni une garantie sur le bien. "
-        "Les éléments importants doivent être confirmés auprès des administrations, professionnels compétents "
-        "et documents opposables avant engagement.",
-        small
-    ))
+    story.append(Paragraph("AVERTISSEMENT IMPORTANT", h1))
+    story.append(Paragraph(pdf_safe(LEGAL_NOTICE_FULL), small))
 
     def footer(canvas,doc):
         canvas.saveState()
         canvas.setFont("Helvetica",7)
         canvas.setFillColor(colors.HexColor("#9CA3AF"))
-        canvas.drawString(16*mm,8*mm,"PRM V1.0A - Rapport décisionnel")
+        canvas.drawString(16*mm,8*mm,"PRM V1.0A.1 - Rapport décisionnel")
         canvas.drawRightString(A4[0]-16*mm,8*mm,f"Page {doc.page}")
         canvas.restoreState()
 
@@ -1508,9 +1522,9 @@ def vegetation_assessment(selected_keys, photo_count):
         "note":"Évaluation visuelle indicative, non réglementaire."
     }
 
-st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V1.0A</div>',unsafe_allow_html=True)
+st.markdown('<div style="font-size:.8rem;letter-spacing:.12em;text-transform:uppercase;color:#9ca3af">Property Risk Management · Prototype V1.0A.1</div>',unsafe_allow_html=True)
 st.title("Avant d’acheter, voyez les risques.")
-st.write("V1.0A affine l’expérience produit, le parcours utilisateur et la restitution PDF sans figer la marque finale.")
+st.write("V1.0A.1 ajoute des garde-fous juridiques visibles dans le parcours et le rapport, sans modifier les moteurs d’analyse.")
 
 
 st.subheader("📷 Compléter avec des photos — optionnel")
@@ -1540,6 +1554,8 @@ with st.form("search"):
     address=st.text_input("Adresse",value="27 rue des Jardins 92380 Garches")
     radius=st.select_slider("Rayon projets voisins",options=[100,250,500],value=500,format_func=lambda x:f"{x} m")
     go=st.form_submit_button("Analyser cette propriété",use_container_width=True)
+
+st.caption("⚖️ " + LEGAL_NOTICE_SHORT)
 
 if go:
     st.session_state["prm_analysis_active"] = True
@@ -1931,6 +1947,12 @@ if analysis_active:
               },"projects":{"radius_m":run_radius,"priority":priority_projects,"all":projects,"errors":project_errors},"climate_2050":climate_profile,"vegetation_visual":veg_assessment,"georisques_pdf":{"available":bool(pdf_text),"error":pdf_error},"urbanism":{"zones":zones,"prescription_count":n_presc}}
 
     st.subheader("📄 Votre rapport décisionnel")
+    st.warning(
+        "⚖️ **Avertissement important** — Ce rapport est un outil d’aide à la décision fondé sur des données publiques "
+        "et des sources tierces disponibles à la date de l’analyse. Il ne constitue ni une expertise, ni un diagnostic "
+        "réglementaire, ni une certification ou une garantie du bien. Les éléments déterminants doivent être confirmés "
+        "à partir des documents officiels opposables et, si nécessaire, auprès de professionnels compétents."
+    )
     report_pdf=build_prm_pdf(
         geo,rows,gs,gl,headline_reason,cats,
         context_lines,future_lines,verify_lines,
@@ -1942,7 +1964,7 @@ if analysis_active:
         st.download_button(
             "Télécharger le rapport PDF",
             data=report_pdf,
-            file_name="rapport_prm_v10a.pdf",
+            file_name="rapport_prm_v10a1.pdf",
             mime="application/pdf",
             use_container_width=True
         )
@@ -1950,13 +1972,19 @@ if analysis_active:
         st.download_button(
             "Télécharger les données techniques JSON",
             data=json.dumps(snapshot,ensure_ascii=False,indent=2).encode("utf-8"),
-            file_name="prm_snapshot_v10a.json",
+            file_name="prm_snapshot_v10a1.json",
             mime="application/json",
             use_container_width=True
         )
 
     with st.expander("Voir les données techniques PRM"):st.json(snapshot)
-    st.caption(
-    "Outil d’aide à la décision. Les éléments déterminants doivent être confirmés auprès des administrations, "
-    "documents opposables ou professionnels compétents avant engagement."
-)
+
+    with st.expander("⚖️ Avertissement, limites et responsabilité"):
+        st.markdown(
+            "**À lire avant toute décision immobilière.**\n\n"
+            + LEGAL_NOTICE_FULL
+            + "\n\nCe texte encadre l’usage du rapport mais ne remplace pas des CGU adaptées au modèle commercial final. "
+              "Avant commercialisation, les CGU et mentions légales devront être relues par un professionnel du droit."
+        )
+
+    st.caption("Outil d’aide à la décision — voir l’avertissement et les limites d’utilisation ci-dessus.")
